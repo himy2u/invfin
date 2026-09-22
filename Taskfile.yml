@@ -1,0 +1,108 @@
+version: "3"
+
+# Orchestrates invfin's STATELESS local dev services (web, mobile bundler, agent service).
+# The database is deliberately excluded — it's always a managed hosted Postgres (Supabase),
+# never something this Taskfile starts/stops. See .claude/rules/dev-environment.md.
+#
+# ENV selects which dotenv file each service loads: .env.<ENV> at the repo root, falling back
+# to .env.<ENV>.example (committed placeholders) with a warning when the real file is absent —
+# real preprod/prod credentials don't exist yet (no Supabase/Stripe accounts created), so those
+# two envs are wired but inert until that happens.
+#
+# The actual start/stop logic lives in scripts/dev/*.sh, run via the real system shell (`sh`) —
+# Task's own built-in interpreter (mvdan/sh, used for cross-platform compatibility) does not do
+# real OS-level job control, so `$!` inside it does not resolve to a genuine kernel PID. Shelling
+# out to real scripts sidesteps that entirely.
+#
+# Usage:
+#   task dev:all                 # ENV=local (default)
+#   task dev:web ENV=preprod
+#   task stop:all
+#   task status
+
+vars:
+  ENV: '{{.ENV | default "local"}}'
+  PIDDIR: "{{.ROOT_DIR}}/.taskpids"
+  LOGDIR: "{{.ROOT_DIR}}/logs"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  dev:web:
+    desc: "Start apps/web (Next.js) in the background. Vars: ENV=local|preprod|prod"
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/start-web.sh {{.ROOT_DIR}} {{.ENV}}
+
+  dev:agent:
+    desc: "Start services/agent (FastAPI, native uv run — fast loop). Vars: ENV=local|preprod|prod"
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/start-agent.sh {{.ROOT_DIR}} {{.ENV}}
+
+  dev:agent:docker:
+    desc: Run services/agent as its production container (parity check, not the fast dev loop)
+    cmds:
+      - docker build -t invfin-agent services/agent
+      - docker run --rm -p 8000:8000 -e APP_ENV={{.ENV}} invfin-agent
+
+  dev:mobile:
+    desc: "Start apps/mobile (Expo/Metro) in the background. Vars: ENV=local|preprod|prod"
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/start-mobile.sh {{.ROOT_DIR}} {{.ENV}}
+
+  dev:mobile:web:
+    desc: "Run the mobile app in a browser (react-native-web) — no phone/QR needed, but fonts/gestures/native modules (image picker) may render or behave slightly differently than the real native app."
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/start-mobile-web.sh {{.ROOT_DIR}} {{.ENV}}
+
+  dev:all:
+    desc: "Start web + agent + mobile together. Vars: ENV=local|preprod|prod"
+    cmds:
+      - task: dev:web
+        vars: { ENV: "{{.ENV}}" }
+      - task: dev:agent
+        vars: { ENV: "{{.ENV}}" }
+      - task: dev:mobile
+        vars: { ENV: "{{.ENV}}" }
+
+  stop:web:
+    desc: Stop the web dev server
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/stop.sh {{.ROOT_DIR}} web
+
+  stop:agent:
+    desc: Stop the agent dev server
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/stop.sh {{.ROOT_DIR}} agent
+
+  stop:mobile:
+    desc: Stop the mobile/Metro dev server
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/stop.sh {{.ROOT_DIR}} mobile
+
+  stop:mobile-web:
+    desc: Stop the mobile-web (react-native-web) dev server
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/stop.sh {{.ROOT_DIR}} mobile-web
+
+  stop:all:
+    desc: Stop all stateless dev services (does NOT touch the database)
+    cmds:
+      - task: stop:web
+      - task: stop:agent
+      - task: stop:mobile
+      - task: stop:mobile-web
+
+  status:
+    desc: Show which stateless dev services are currently running
+    cmds:
+      - sh {{.ROOT_DIR}}/scripts/dev/status.sh {{.ROOT_DIR}}
+
+  db:validate:
+    desc: Spin up local Supabase (Docker), reset DB to replay all migrations, then stop it
+    cmds:
+      - supabase start
+      - supabase db reset
+      - supabase stop

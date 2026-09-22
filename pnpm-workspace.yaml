@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "esbuild"
+  - "unrs-resolver"
+allowBuilds:
+  '@parcel/watcher': false
+  core-js: true
+  esbuild: false
+  unrs-resolver: false

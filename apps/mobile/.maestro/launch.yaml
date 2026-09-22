@@ -1,0 +1,4 @@
+appId: com.invfin.mobile
+---
+- launchApp
+- assertVisible: "Open up App.tsx"
