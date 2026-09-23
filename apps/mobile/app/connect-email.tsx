@@ -38,6 +38,7 @@ export default function ConnectEmailScreen() {
   >([]);
   const [starting, setStarting] = useState(false);
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
   const [showGmailSteps, setShowGmailSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +165,22 @@ export default function ConnectEmailScreen() {
       setTestStatus(res.ok ? "sent" : "error");
     } catch {
       setTestStatus("error");
+    }
+  }
+
+  async function sendTestReminder() {
+    setReminderTestStatus("sending");
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error("not signed in");
+      const res = await fetch(`${AGENT_SERVICE_URL}/send-test-reminder`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setReminderTestStatus(res.ok ? "sent" : "error");
+    } catch {
+      setReminderTestStatus("error");
     }
   }
 
@@ -319,21 +336,50 @@ export default function ConnectEmailScreen() {
             </Text>
           ) : null}
 
-          <View style={{ marginTop: spacing.md }}>
-            <Pressable
-              style={[styles.testButton, testStatus === "sending" && styles.buttonDisabled]}
-              onPress={sendTestBill}
-              disabled={testStatus === "sending"}
-              testID="send-test-bill-button"
-            >
-              <Text style={styles.testButtonText}>{testStatus === "sending" ? "Sending…" : "Send a test bill"}</Text>
-            </Pressable>
-            {testStatus === "sent" && (
-              <Text style={styles.testSentText} testID="test-bill-sent">
-                ✓ Sent, check Bills in a few seconds.
-              </Text>
-            )}
-            {testStatus === "error" && <Text style={styles.error}>Test send failed. Try again.</Text>}
+          <View style={styles.explainerBox}>
+            <Text style={styles.explainerText}>
+              We only see mail you forward, starting from when you turn this on. Nothing already in
+              your inbox gets scanned. Forward one real bill to the address above to test with real
+              content, or use the buttons below to check the plumbing with made-up data.
+            </Text>
+          </View>
+
+          <View style={styles.testButtonRow}>
+            <View>
+              <Pressable
+                style={[styles.testButton, testStatus === "sending" && styles.buttonDisabled]}
+                onPress={sendTestBill}
+                disabled={testStatus === "sending"}
+                testID="send-test-bill-button"
+              >
+                <Text style={styles.testButtonText}>{testStatus === "sending" ? "Sending…" : "Send a fake test bill"}</Text>
+              </Pressable>
+              {testStatus === "sent" && (
+                <Text style={styles.testSentText} testID="test-bill-sent">
+                  ✓ Sent "Sample Utility Co." (not real), check Bills.
+                </Text>
+              )}
+              {testStatus === "error" && <Text style={styles.error}>Test send failed. Try again.</Text>}
+            </View>
+
+            <View>
+              <Pressable
+                style={[styles.testButton, (reminderTestStatus === "sending" || !hasDetectedBill) && styles.buttonDisabled]}
+                onPress={sendTestReminder}
+                disabled={reminderTestStatus === "sending" || !hasDetectedBill}
+                testID="send-test-reminder-button"
+              >
+                <Text style={styles.testButtonText}>{reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder now"}</Text>
+              </Pressable>
+              {reminderTestStatus === "sent" && (
+                <Text style={styles.testSentText} testID="test-reminder-sent">
+                  ✓ Sent via your channels below.
+                </Text>
+              )}
+              {reminderTestStatus === "error" && (
+                <Text style={styles.error}>{hasDetectedBill ? "Test send failed. Try again." : "Detect a bill first."}</Text>
+              )}
+            </View>
           </View>
 
           <View style={styles.reminderRow}>
@@ -453,6 +499,9 @@ const styles = StyleSheet.create({
   codeLabel: { fontSize: 11, color: colors.brandDark },
   confirmLinkButton: { marginTop: spacing.sm, backgroundColor: colors.brand, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
   confirmLinkButtonText: { color: colors.textOnBrand, fontWeight: "700", fontSize: 13 },
+  explainerBox: { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.md },
+  explainerText: { fontSize: 11, color: colors.textMuted, lineHeight: 16 },
+  testButtonRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.md, marginTop: spacing.md },
   testButton: { borderWidth: 1, borderColor: colors.brandBorder, backgroundColor: colors.surface, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
   testButtonText: { color: colors.brand, fontWeight: "700", fontSize: 13 },
   testSentText: { fontSize: 12, color: colors.brand, marginTop: spacing.xs },

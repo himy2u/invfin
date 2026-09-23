@@ -54,6 +54,7 @@ export function ConnectEmailWizard({
   >([]);
   const [starting, setStarting] = useState(false);
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
   const [showGmailSteps, setShowGmailSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,6 +95,22 @@ export function ConnectEmailWizard({
       setTestStatus(res.ok ? "sent" : "error");
     } catch {
       setTestStatus("error");
+    }
+  }
+
+  async function sendTestReminder() {
+    setReminderTestStatus("sending");
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error("not signed in");
+      const res = await fetch(`${process.env.NEXT_PUBLIC_AGENT_SERVICE_URL}/send-test-reminder`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setReminderTestStatus(res.ok ? "sent" : "error");
+    } catch {
+      setReminderTestStatus("error");
     }
   }
 
@@ -272,21 +289,50 @@ export function ConnectEmailWizard({
               </p>
             ) : null}
 
-            <div>
-              <button
-                onClick={sendTestBill}
-                disabled={testStatus === "sending"}
-                data-testid="send-test-bill-button"
-                className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
-              >
-                {testStatus === "sending" ? "Sending…" : "Send a test bill"}
-              </button>
-              {testStatus === "sent" && (
-                <p className="mt-2 text-xs text-teal-700" data-testid="test-bill-sent">
-                  ✓ Sent, check Bills in a few seconds.
-                </p>
-              )}
-              {testStatus === "error" && <p className="mt-2 text-xs text-red-600">Test send failed. Try again.</p>}
+            <div className="rounded-lg bg-zinc-50 p-3 text-xs text-zinc-500">
+              We only see mail you forward, starting from when you turn this on. Nothing already in
+              your inbox gets scanned. Forward one real bill to the address above to test with real
+              content, or use the buttons below to check the plumbing with made-up data.
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <div>
+                <button
+                  onClick={sendTestBill}
+                  disabled={testStatus === "sending"}
+                  data-testid="send-test-bill-button"
+                  className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                >
+                  {testStatus === "sending" ? "Sending…" : "Send a fake test bill"}
+                </button>
+                {testStatus === "sent" && (
+                  <p className="mt-2 text-xs text-teal-700" data-testid="test-bill-sent">
+                    ✓ Sent "Sample Utility Co." (not a real bill), check Bills in a few seconds.
+                  </p>
+                )}
+                {testStatus === "error" && <p className="mt-2 text-xs text-red-600">Test send failed. Try again.</p>}
+              </div>
+
+              <div>
+                <button
+                  onClick={sendTestReminder}
+                  disabled={reminderTestStatus === "sending" || !hasDetectedBill}
+                  data-testid="send-test-reminder-button"
+                  className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                >
+                  {reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder now"}
+                </button>
+                {reminderTestStatus === "sent" && (
+                  <p className="mt-2 text-xs text-teal-700" data-testid="test-reminder-sent">
+                    ✓ Sent via your enabled channels below, for your most recently detected bill.
+                  </p>
+                )}
+                {reminderTestStatus === "error" && (
+                  <p className="mt-2 text-xs text-red-600">
+                    {hasDetectedBill ? "Test send failed. Try again." : "Detect a bill first."}
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-wrap items-end gap-6 border-t border-zinc-100 pt-5">

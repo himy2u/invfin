@@ -51,6 +51,12 @@ class FakeQuery:
     def select(self, *_args, **_kwargs):
         return self
 
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
     def eq(self, key, value):
         self._filters[key] = value
         return self
@@ -241,6 +247,44 @@ def test_send_test_bill_enqueues_for_the_authenticated_users_own_address():
     queued_row = store["inbound_email_queue"]["inserts"][0]
     assert queued_row["forwarding_token"] == "abc123"
     assert queued_row["user_id"] == "u1"
+
+
+def test_send_test_reminder_rejects_invalid_session():
+    client, _ = _build_app({}, {})
+    response = client.post("/send-test-reminder", headers={"Authorization": "Bearer not-a-real-token"})
+    assert response.status_code == 401
+
+
+def test_send_test_reminder_rejects_when_no_detected_bill_yet():
+    client, _ = _build_app({}, {})
+    response = client.post("/send-test-reminder", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 400
+
+
+def test_send_test_reminder_sends_without_touching_reminder_sent_at():
+    store = {
+        "bills": {
+            "rows": [
+                {
+                    "id": "bill-1",
+                    "user_id": "u1",
+                    "vendor_name": "Acme Water",
+                    "due_date": "2026-12-01",
+                    "source": "email",
+                    "reminder_sent_at": None,
+                }
+            ]
+        }
+    }
+    client, _ = _build_app(store, {})
+    response = client.post("/send-test-reminder", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 200
+    assert response.json() == {"status": "sent", "bill_id": "bill-1"}
+    # A test reminder must never mark the real reminder as already sent for this bill.
+    assert store["bills"]["rows"][0]["reminder_sent_at"] is None
+    notif = store["notifications"]["inserts"][0]
+    assert notif["type"] == "bill_reminder"
+    assert "Acme Water" in notif["body"]
 
 
 def test_inbound_email_ignored_when_detection_disabled():

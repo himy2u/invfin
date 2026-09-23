@@ -382,6 +382,45 @@ async def send_test_bill(
     return result
 
 
+@router.post("/send-test-reminder")
+async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict[str, str]:
+    # Same reasoning as /send-test-bill: lets a user verify reminder delivery (email/push/in-app)
+    # actually works right now, without waiting for a bill's real due date. Deliberately does NOT
+    # touch reminder_sent_at or go through claim_bill_reminder — those belong only to the real
+    # once-per-bill reminder cron, and a test send must never suppress that later real reminder.
+    client = get_service_client()
+    try:
+        user_response = client.auth.get_user(credentials.credentials)
+    except Exception as exc:
+        raise HTTPException(401, "invalid session") from exc
+    if not user_response or not user_response.user:
+        raise HTTPException(401, "invalid session")
+    user_id = user_response.user.id
+
+    bill_row = (
+        client.table("bills")
+        .select("id, vendor_name, due_date")
+        .eq("user_id", user_id)
+        .eq("source", "email")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not bill_row.data:
+        raise HTTPException(400, "no detected bill to send a test reminder for yet")
+    bill = bill_row.data[0]
+
+    _notify_user(
+        client,
+        user_id,
+        bill["id"],
+        "Test reminder",
+        f"This is a test reminder for {bill['vendor_name']} (due {bill['due_date']}). Real reminders arrive once, this close to the due date you set.",
+        "bill_reminder",
+    )
+    return {"status": "sent", "bill_id": bill["id"]}
+
+
 _QUEUE_SWEEP_BATCH_SIZE = 20
 
 
