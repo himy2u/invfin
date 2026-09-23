@@ -56,7 +56,6 @@ export function ConnectEmailWizard({
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
-  const [showGmailSteps, setShowGmailSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeq = useRef(0);
@@ -251,33 +250,25 @@ export function ConnectEmailWizard({
                     {copied ? "Copied!" : "Copy"}
                   </button>
                 </div>
-                <button
-                  onClick={() => setShowGmailSteps((v) => !v)}
-                  className="mt-2 text-xs text-teal-700 underline"
-                >
-                  {showGmailSteps ? "Hide" : "How do I add this in Gmail?"}
-                </button>
-                {showGmailSteps && (
-                  <div className="mt-2 rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">
-                    <p className="font-medium text-zinc-700">1. Register the address (one-time)</p>
-                    <ol className="mt-1 list-decimal space-y-1 pl-5">
-                      <li>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</li>
-                      <li>Paste the address above and confirm it.</li>
-                    </ol>
-                    <p className="mt-3 font-medium text-zinc-700">2. Forward only bills, not everything</p>
-                    <ol className="mt-1 list-decimal space-y-1 pl-5">
-                      <li>
-                        In Gmail&apos;s search bar, search: <code className="rounded bg-white px-1 py-0.5">subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)</code>
-                      </li>
-                      <li>Click the filter icon (⚙ or ▾) at the right of the search bar → &quot;Create filter&quot;.</li>
-                      <li>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</li>
-                    </ol>
-                    <p className="mt-2 text-zinc-400">
-                      Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
-                      inbox, not just bills.
-                    </p>
-                  </div>
-                )}
+                <div className="mt-3 rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">
+                  <p className="font-medium text-zinc-700">1. Register the address in Gmail (one-time)</p>
+                  <ol className="mt-1 list-decimal space-y-1 pl-5">
+                    <li>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</li>
+                    <li>Paste the address above and confirm it.</li>
+                  </ol>
+                  <p className="mt-3 font-medium text-zinc-700">2. Forward only bills, not everything</p>
+                  <ol className="mt-1 list-decimal space-y-1 pl-5">
+                    <li>
+                      In Gmail&apos;s search bar, search: <code className="rounded bg-white px-1 py-0.5">subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)</code>
+                    </li>
+                    <li>Click the filter icon (⚙ or ▾) at the right of the search bar → &quot;Create filter&quot;.</li>
+                    <li>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</li>
+                  </ol>
+                  <p className="mt-2 text-zinc-400">
+                    Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
+                    inbox, not just bills.
+                  </p>
+                </div>
               </div>
             )}
 

@@ -40,7 +40,6 @@ export default function ConnectEmailScreen() {
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
-  const [showGmailSteps, setShowGmailSteps] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeq = useRef(0);
@@ -307,26 +306,21 @@ export default function ConnectEmailScreen() {
                   <Text style={styles.copyButtonText}>{copied ? "Copied!" : "Copy"}</Text>
                 </Pressable>
               </View>
-              <Pressable onPress={() => setShowGmailSteps((v) => !v)}>
-                <Text style={styles.helpToggle}>{showGmailSteps ? "Hide" : "How do I add this in Gmail?"}</Text>
-              </Pressable>
-              {showGmailSteps && (
-                <View style={styles.gmailStepsBox}>
-                  <Text style={styles.gmailStepsHeading}>1. Register the address (one-time)</Text>
-                  <Text style={styles.stepListItem}>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</Text>
-                  <Text style={styles.stepListItem}>Paste the address above and confirm it.</Text>
-                  <Text style={styles.gmailStepsHeading}>2. Forward only bills, not everything</Text>
-                  <Text style={styles.stepListItem}>
-                    Search Gmail: subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)
-                  </Text>
-                  <Text style={styles.stepListItem}>Tap the filter icon at the right of the search bar → &quot;Create filter&quot;.</Text>
-                  <Text style={styles.stepListItem}>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</Text>
-                  <Text style={styles.gmailStepsHint}>
-                    Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
-                    inbox, not just bills.
-                  </Text>
-                </View>
-              )}
+              <View style={styles.gmailStepsBox}>
+                <Text style={styles.gmailStepsHeading}>1. Register the address in Gmail (one-time)</Text>
+                <Text style={styles.stepListItem}>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</Text>
+                <Text style={styles.stepListItem}>Paste the address above and confirm it.</Text>
+                <Text style={styles.gmailStepsHeading}>2. Forward only bills, not everything</Text>
+                <Text style={styles.stepListItem}>
+                  Search Gmail: subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)
+                </Text>
+                <Text style={styles.stepListItem}>Tap the filter icon at the right of the search bar → &quot;Create filter&quot;.</Text>
+                <Text style={styles.stepListItem}>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</Text>
+                <Text style={styles.gmailStepsHint}>
+                  Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
+                  inbox, not just bills.
+                </Text>
+              </View>
             </View>
           )}
 
@@ -504,7 +498,6 @@ const styles = StyleSheet.create({
   addressText: { flex: 1, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.sm, padding: 10, fontSize: 13, backgroundColor: colors.surfaceAlt },
   copyButton: { borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: 10 },
   copyButtonText: { fontSize: 12, fontWeight: "600" },
-  helpToggle: { fontSize: 12, color: colors.brand, textDecorationLine: "underline", marginTop: spacing.xs },
   gmailStepsBox: { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.xs },
   gmailStepsHeading: { fontSize: 12, fontWeight: "700", color: colors.textPrimary, marginTop: spacing.sm },
   gmailStepsHint: { fontSize: 11, color: colors.textMuted, marginTop: spacing.sm, lineHeight: 16 },
