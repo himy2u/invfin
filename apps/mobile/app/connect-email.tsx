@@ -168,7 +168,10 @@ export default function ConnectEmailScreen() {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
-      setTestStatus(res.ok ? "sent" : "error");
+      // "queued" is the only outcome that actually creates a bill. The endpoint answers 200 for
+      // "duplicate"/"ignored"/"dead_letter" too. Mirrors apps/web's wizard.
+      const body = await res.json().catch(() => null);
+      setTestStatus(res.ok && body?.status === "queued" ? "sent" : "error");
     } catch {
       setTestStatus("error");
     }

@@ -6,7 +6,12 @@ import os
 os.environ["INBOUND_EMAIL_WEBHOOK_USER"] = "testuser"
 os.environ["INBOUND_EMAIL_WEBHOOK_PASSWORD"] = "testpass"
 os.environ.setdefault("GEMINI_API_KEY", "unused-in-these-tests")
-os.environ.setdefault("EMAIL_FORWARDING_DOMAIN", "inbox.invfin.app")
+# Force-set for the same reason as the webhook credentials above: these tests build recipient
+# addresses at "inbox.invfin.app", so a setdefault let the real EMAIL_FORWARDING_DOMAIN from the
+# repo's .env.local ("inbox.housing360.app") win whenever the suite was run with that file sourced.
+# Every inbound-email test then dead-lettered with "unresolvable_recipient", a failure that looks
+# like a routing regression but is purely ambient-environment leakage.
+os.environ["EMAIL_FORWARDING_DOMAIN"] = "inbox.invfin.app"
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -247,6 +252,25 @@ def test_send_test_bill_enqueues_for_the_authenticated_users_own_address():
     queued_row = store["inbound_email_queue"]["inserts"][0]
     assert queued_row["forwarding_token"] == "abc123"
     assert queued_row["user_id"] == "u1"
+
+
+def test_send_test_bill_twice_enqueues_twice():
+    # Regression: MessageID used to be a fixed f"self-test-{user_id}", which is the inbound queue's
+    # idempotency key. The first click consumed it permanently, so every later click conflicted,
+    # returned {"status": "duplicate"} with HTTP 200, and created no bill, while the web and mobile
+    # UIs both read that 200 as success and displayed "✓ Sent, check Bills".
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {})
+    headers = {"Authorization": "Bearer valid-user-token"}
+
+    first = client.post("/send-test-bill", headers=headers)
+    second = client.post("/send-test-bill", headers=headers)
+
+    assert first.json()["status"] == "queued"
+    assert second.json()["status"] == "queued"
+    inserts = store["inbound_email_queue"]["inserts"]
+    assert len(inserts) == 2
+    assert inserts[0]["message_id"] != inserts[1]["message_id"]
 
 
 def test_send_test_reminder_rejects_invalid_session():

@@ -367,8 +367,15 @@ async def send_test_bill(
     token = address_row.data[0]["forwarding_token"]
 
     due_date = (datetime.now(timezone.utc) + timedelta(days=14)).date().isoformat()
+    # A fresh MessageID per click, NOT a fixed per-user one. message_id is the idempotency key for
+    # the inbound queue (it exists so a Postmark redelivery of the same email can't double-create a
+    # bill), so a fixed "self-test-{user_id}" made the very first click consume that key forever:
+    # every later click hit the unique constraint, returned {"status": "duplicate"} with HTTP 200,
+    # and created nothing, while both UIs read the 200 as success and told the user "✓ Sent, check
+    # Bills". A user-initiated test send is not a webhook redelivery and must never be deduplicated
+    # against an earlier one.
     payload = InboundEmailPayload(
-        MessageID=f"self-test-{user_id}",
+        MessageID=f"self-test-{user_id}-{secrets.token_hex(8)}",
         Subject="Your Sample Utility bill is ready",
         TextBody=(
             "Dear Customer,\n\nYour bill from Sample Utility Co. is now available.\n\n"

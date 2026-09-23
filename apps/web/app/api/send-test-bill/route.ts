@@ -3,8 +3,10 @@ import { createClient } from "@/lib/supabase/server";
 
 // Lets a user prove detection actually works without composing and forwarding a real email
 // themselves — same shape as a real Postmark inbound payload, sent to the same webhook, so it
-// exercises the exact code path a real forwarded bill would. Uses a fixed MessageID per user so
-// clicking twice re-triggers rather than piling up duplicate test bills.
+// exercises the exact code path a real forwarded bill would. Uses a FRESH MessageID per click:
+// message_id is the inbound queue's idempotency key (so a Postmark redelivery can't double-create
+// a bill), so a fixed per-user id made the first click consume it permanently and every later
+// click a silent no-op that still reported success.
 export async function POST() {
   const supabase = await createClient();
   const {
@@ -38,7 +40,7 @@ export async function POST() {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
     body: JSON.stringify({
-      MessageID: `self-test-${user.id}`,
+      MessageID: `self-test-${user.id}-${crypto.randomUUID()}`,
       Subject: "Your Sample Utility bill is ready",
       TextBody: `Dear Customer,\n\nYour bill from Sample Utility Co. is now available.\n\nAmount Due: $42.00\nDue Date: ${dueDateStr}\n\nSample Utility Co.\n1 Test Street`,
       OriginalRecipient: `${forwarding.forwarding_token}@${forwardingDomain}`,

@@ -92,7 +92,11 @@ export function ConnectEmailWizard({
     setTestStatus("sending");
     try {
       const res = await fetch("/api/send-test-bill", { method: "POST" });
-      setTestStatus(res.ok ? "sent" : "error");
+      // "queued" is the only outcome that actually creates a bill. The webhook answers 200 for
+      // "duplicate"/"ignored"/"dead_letter" too, so res.ok alone used to render "✓ Sent, check
+      // Bills" over a send that did nothing at all.
+      const body = await res.json().catch(() => null);
+      setTestStatus(res.ok && body?.status === "queued" ? "sent" : "error");
     } catch {
       setTestStatus("error");
     }
