@@ -57,9 +57,9 @@ test("toggling on email bill detection, an inbound bill lands in review, and app
   const token = forwardingAddress.split("@")[0];
   expect(token).toMatch(/^[a-f0-9]{32}$/);
 
-  // Step 1b: simulate Gmail's forwarding-confirmation email and confirm the wizard relays the
-  // code — this is the ONLY place the user ever sees it, since the forwarding address itself is
-  // the thing being confirmed.
+  // Step 1b: simulate Gmail's real forwarding-confirmation email (a clickable link, not a typed
+  // code — verified against a live message) and confirm the wizard relays it. This is the ONLY
+  // place the user ever sees it, since the forwarding address itself is the thing being confirmed.
   const webhookUser = readRootEnv("INBOUND_EMAIL_WEBHOOK_USER");
   const webhookPassword = readRootEnv("INBOUND_EMAIL_WEBHOOK_PASSWORD");
   const auth = Buffer.from(`${webhookUser}:${webhookPassword}`).toString("base64");
@@ -69,11 +69,12 @@ test("toggling on email bill detection, an inbound bill lands in review, and app
     body: JSON.stringify({
       MessageID: `confirm-${Date.now()}`,
       Subject: "Gmail Forwarding Confirmation",
-      TextBody: `You requested forwarding.\n\nConfirmation code: 4821093\n\nThis confirms forwarding to ${forwardingAddress}.`,
+      TextBody: `please click the link below to confirm the request:\n\nhttps://mail-settings.google.com/mail/vf-testtoken\n\nThis confirms forwarding to ${forwardingAddress}.`,
       OriginalRecipient: forwardingAddress,
     }),
   });
-  await expect(page.getByTestId("confirmation-code")).toContainText("4821093", { timeout: 10000 });
+  await expect(page.getByTestId("confirmation-link")).toBeVisible({ timeout: 10000 });
+  await expect(page.getByTestId("confirmation-link")).toContainText("Confirm forwarding in Gmail");
 
   // Step 2: simulate Postmark POSTing an inbound bill email addressed to that forwarding address.
   const messageId = `e2e-${Date.now()}`;
@@ -185,10 +186,10 @@ test("a bill detected before Gmail confirmation shows an already-working indicat
     }),
   });
 
-  // The confirmation step should still show it's waiting (never faked as done)...
-  await expect(page.getByText(/Waiting for Gmail/i)).toBeVisible();
+  // No confirmation link has arrived (never faked as done)...
+  await expect(page.getByTestId("confirmation-link")).not.toBeVisible();
   // ...but the positive "already working" indicator should appear once a bill is actually
   // detected, rather than leaving the user thinking nothing happened.
   await expect(page.getByTestId("already-detecting")).toBeVisible({ timeout: 90000 });
-  await expect(page.getByTestId("confirmation-code")).not.toBeVisible();
+  await expect(page.getByTestId("confirmation-link")).not.toBeVisible();
 });

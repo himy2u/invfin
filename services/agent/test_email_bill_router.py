@@ -186,10 +186,16 @@ def test_inbound_email_dead_letters_unknown_token():
     assert response.json() == {"status": "dead_letter", "reason": "unknown_token"}
 
 
-def test_inbound_email_relays_gmail_confirmation_code():
+def test_inbound_email_relays_gmail_confirmation_link():
     store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": False}]}}
     client, _ = _build_app(store, {})
-    body = "Confirmation code: 4821093\n\nThis confirms forwarding to bills+abc123@inbox.invfin.app."
+    # Real Gmail forwarding-confirmation emails send a clickable link, not a typed code — see the
+    # comment in email_bill_detect.py, verified against a live message.
+    body = (
+        "please click the link below to confirm the request:\n\n"
+        "https://mail-settings.google.com/mail/vf-abc123\n\n"
+        "This confirms forwarding to abc123@inbox.housing360.app."
+    )
     response = client.post(
         "/inbound-email",
         json={"MessageID": "m2", "Subject": "Gmail Forwarding Confirmation", "TextBody": body, "OriginalRecipient": "abc123@inbox.invfin.app"},
@@ -197,7 +203,7 @@ def test_inbound_email_relays_gmail_confirmation_code():
     )
     assert response.status_code == 200
     assert response.json() == {"status": "confirmation_relayed"}
-    assert "4821093" in store["notifications"]["inserts"][0]["body"]
+    assert "https://mail-settings.google.com/mail/vf-abc123" in store["notifications"]["inserts"][0]["body"]
 
 
 def test_inbound_email_ignored_when_detection_disabled():

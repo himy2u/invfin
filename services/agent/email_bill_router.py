@@ -14,7 +14,7 @@ from email_bill_detect import (
     CLASSIFY_CONFIDENCE_THRESHOLD,
     BillExtractionFailed,
     classify_bill_email,
-    detect_gmail_confirmation_code,
+    detect_gmail_confirmation_link,
     extract_bill_from_email,
 )
 from logging_setup import logger
@@ -151,14 +151,14 @@ def _enqueue_inbound_email(payload: InboundEmailPayload) -> dict[str, str]:
 
     body_text = payload.TextBody[:_MAX_BODY_CHARS]
 
-    confirmation_code = detect_gmail_confirmation_code(payload.Subject, body_text)
-    if confirmation_code:
+    confirmation_link = detect_gmail_confirmation_link(payload.Subject, body_text)
+    if confirmation_link:
         _notify_user(
             client,
             user_id,
             None,
-            "Gmail forwarding confirmation code",
-            f"Enter this code in Gmail to finish setup: {confirmation_code}",
+            "Confirm forwarding in Gmail",
+            confirmation_link,
             "gmail_confirmation",
         )
         return {"status": "confirmation_relayed"}

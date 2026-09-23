@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { View, Text, TextInput, Pressable, ScrollView, StyleSheet } from "react-native";
+import { View, Text, TextInput, Pressable, ScrollView, StyleSheet, Linking } from "react-native";
 import { useRouter } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import { supabase } from "../lib/supabase";
@@ -34,7 +34,7 @@ export default function ConnectEmailScreen() {
   const [channels, setChannels] = useState<Channels>({ push: true, email: true, in_app: true });
   const [sourceEmail, setSourceEmail] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
-  const [confirmationCode, setConfirmationCode] = useState<string | null>(null);
+  const [confirmationLink, setConfirmationLink] = useState<string | null>(null);
   const [hasDetectedBill, setHasDetectedBill] = useState(false);
   const [recentBills, setRecentBills] = useState<
     { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; status: string; reminder_days_before: number }[]
@@ -89,7 +89,7 @@ export default function ConnectEmailScreen() {
     if (!enabled || !userId) return;
     let cancelled = false;
     const poll = async () => {
-      if (!confirmationCode) {
+      if (!confirmationLink) {
         const { data } = await supabase
           .from("notifications")
           .select("body")
@@ -99,8 +99,8 @@ export default function ConnectEmailScreen() {
           .limit(1)
           .maybeSingle();
         if (!cancelled && data) {
-          const match = data.body.match(/(\d{6,8})/);
-          if (match) setConfirmationCode(match[1]);
+          const match = data.body.match(/(https:\/\/mail-settings\.google\.com\/mail\/vf-\S+)/);
+          if (match) setConfirmationLink(match[1]);
         }
       }
       const { data: bills } = await supabase
@@ -120,7 +120,7 @@ export default function ConnectEmailScreen() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [enabled, confirmationCode, hasDetectedBill, userId]);
+  }, [enabled, confirmationLink, hasDetectedBill, userId]);
 
   async function getStarted() {
     if (!userId) return;
@@ -178,16 +178,18 @@ export default function ConnectEmailScreen() {
       if (mySeq !== saveSeq.current) return;
       const { error } = await supabase
         .from("profiles")
-        .update({ reminder_days_before_default: parsed, reminder_channels: nextChannels })
-        .eq("user_id", userId);
+        .upsert(
+          { user_id: userId, reminder_days_before_default: parsed, reminder_channels: nextChannels },
+          { onConflict: "user_id" },
+        );
       if (mySeq !== saveSeq.current) return;
       if (error) setError(error.message);
     }, 400);
   }
 
   const forwardingAddress = forwardingToken ? `${forwardingToken}@${FORWARDING_DOMAIN}` : null;
-  const step3State: StepState = !enabled ? "pending" : confirmationCode ? "done" : "active";
-  const step4State: StepState = !enabled ? "pending" : confirmationCode ? "active" : "pending";
+  const step3State: StepState = !enabled ? "pending" : confirmationLink ? "done" : "active";
+  const step4State: StepState = !enabled ? "pending" : confirmationLink ? "active" : "pending";
 
   return (
     <ScrollView style={styles.container} testID="connect-email-screen">
@@ -289,10 +291,10 @@ export default function ConnectEmailScreen() {
 
       {/* Step 4 */}
       <View style={[styles.step, !enabled && styles.stepFaded]}>
-        <StepBubble state={confirmationCode ? "done" : step3State} />
+        <StepBubble state={confirmationLink ? "done" : step3State} />
         <View style={styles.stepBody}>
           <Text style={styles.stepTitle}>Confirm the address</Text>
-          {enabled && !confirmationCode && (
+          {enabled && !confirmationLink && (
             <>
               <Text style={styles.stepText}>Waiting for Gmail&apos;s confirmation email. This usually takes under a minute.</Text>
               {hasDetectedBill ? (
@@ -302,15 +304,20 @@ export default function ConnectEmailScreen() {
               ) : (
                 <Text style={styles.stepHint}>
                   This step is just for your own reference in Gmail. Detection already works once you&apos;ve added
-                  the address above, whether or not this code ever arrives.
+                  the address above, whether or not this confirmation email ever arrives.
                 </Text>
               )}
             </>
           )}
-          {confirmationCode && (
-            <View style={styles.codeBox} testID="confirmation-code">
-              <Text style={styles.codeLabel}>Enter this code in Gmail to finish confirming:</Text>
-              <Text style={styles.codeValue}>{confirmationCode}</Text>
+          {confirmationLink && (
+            <View style={styles.codeBox} testID="confirmation-link">
+              <Text style={styles.codeLabel}>Gmail needs you to confirm this request:</Text>
+              <Pressable
+                style={styles.confirmLinkButton}
+                onPress={() => Linking.openURL(confirmationLink)}
+              >
+                <Text style={styles.confirmLinkButtonText}>Confirm forwarding in Gmail →</Text>
+              </Pressable>
             </View>
           )}
         </View>
@@ -318,7 +325,7 @@ export default function ConnectEmailScreen() {
 
       {/* Step 5 */}
       <View style={[styles.step, !enabled && styles.stepFaded]}>
-        <StepBubble state={step4State === "pending" && confirmationCode ? "done" : "pending"} />
+        <StepBubble state={step4State === "pending" && confirmationLink ? "done" : "pending"} />
         <View style={styles.stepBody}>
           <Text style={styles.stepTitle}>Set your reminder preferences</Text>
           <Text style={styles.stepText}>
@@ -442,6 +449,8 @@ const styles = StyleSheet.create({
   codeBox: { marginTop: spacing.sm, backgroundColor: colors.brandLight, borderWidth: 1, borderColor: colors.brandBorder, borderRadius: radius.md, padding: spacing.md },
   codeLabel: { fontSize: 11, color: colors.brandDark },
   codeValue: { fontSize: 26, fontWeight: "800", color: colors.brandDark, letterSpacing: 2, marginTop: 4 },
+  confirmLinkButton: { marginTop: spacing.sm, backgroundColor: colors.brand, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
+  confirmLinkButtonText: { color: colors.textOnBrand, fontWeight: "700", fontSize: 13 },
   channelChip: { borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 6, marginTop: spacing.xs },
   channelChipText: { fontSize: 12, color: colors.textMuted },
   channelChipTextActive: { color: colors.brand, fontWeight: "600" },

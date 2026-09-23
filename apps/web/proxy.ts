@@ -2,7 +2,15 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PROTECTED_PREFIXES = ["/invoices", "/clients", "/dashboard", "/settings"];
+const PROTECTED_PREFIXES = [
+  "/invoices",
+  "/clients",
+  "/dashboard",
+  "/settings",
+  "/connect-email",
+  "/bills",
+  "/estimates",
+];
 
 // Two jobs in one proxy: (1) tag every request with x-request-id so it can be traced from the
 // browser console through Next.js into services/agent, and (2) refresh the Supabase session

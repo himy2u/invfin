@@ -50,7 +50,11 @@ this email should not have reached this step; make your best reading of any date
 # queue at all.
 CLASSIFY_CONFIDENCE_THRESHOLD = 0.7
 
-_GMAIL_CONFIRMATION_CODE_RE = re.compile(r"\bconfirmation code[:\s]+(\d{6,8})\b", re.IGNORECASE)
+# Gmail's real forwarding-confirmation email (verified against a live message, 2026-09-23) is a
+# clickable link, not a typed code — there is no "confirmation code" text anywhere in it. The
+# confirm link's path always starts with /mail/vf- (the cancel link alongside it uses /mail/uf-,
+# which must NOT match here or the wizard would hand the user a link that undoes the request).
+_GMAIL_CONFIRMATION_LINK_RE = re.compile(r"https://mail-settings\.google\.com/mail/vf-\S+")
 
 
 class ClassifyResult(BaseModel):
@@ -126,14 +130,14 @@ def extract_bill_from_email(api_key: str, subject: str, body_text: str) -> BillE
         raise BillExtractionFailed(f"extraction output did not parse: {exc}") from exc
 
 
-def detect_gmail_confirmation_code(subject: str, body_text: str) -> str | None:
+def detect_gmail_confirmation_link(subject: str, body_text: str) -> str | None:
     # Special-cased rather than run through the general classifier/extractor: this is Gmail's own
     # transactional "confirm this forwarding address" email, structurally identical every time, and
-    # the ONLY way the user ever finds out this code (they have no inbox at bills+token@invfin.app
-    # to check it in themselves — this webhook catching it and relaying it in-app is the entire
-    # mechanism). A regex on a fixed template is more reliable here than an LLM call, and doesn't
-    # depend on GEMINI_API_KEY / network being up for something this basic.
+    # the ONLY way the user ever sees this link (they have no inbox at the generated forwarding
+    # address to open it in themselves — this webhook catching it and relaying it in-app is the
+    # entire mechanism). A regex on a fixed template is more reliable here than an LLM call, and
+    # doesn't depend on GEMINI_API_KEY / network being up for something this basic.
     if "forwarding" not in subject.lower() and "forwarding" not in body_text.lower():
         return None
-    match = _GMAIL_CONFIRMATION_CODE_RE.search(body_text)
-    return match.group(1) if match else None
+    match = _GMAIL_CONFIRMATION_LINK_RE.search(body_text)
+    return match.group(0) if match else None
