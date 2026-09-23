@@ -50,11 +50,13 @@ this email should not have reached this step; make your best reading of any date
 # queue at all.
 CLASSIFY_CONFIDENCE_THRESHOLD = 0.7
 
-# Gmail's real forwarding-confirmation email (verified against a live message, 2026-09-23) is a
-# clickable link, not a typed code — there is no "confirmation code" text anywhere in it. The
-# confirm link's path always starts with /mail/vf- (the cancel link alongside it uses /mail/uf-,
+# Gmail's real forwarding-confirmation email (verified against two live messages, 2026-09-23) is a
+# clickable link, not a typed code — there is no "confirmation code" text anywhere in it. Gmail
+# uses more than one host for this link (mail-settings.google.com in one message, mail.google.com
+# in another, from the same account within minutes) so this matches the host loosely rather than
+# pinning one. The path always starts with /mail/vf- (the cancel link alongside it uses /mail/uf-,
 # which must NOT match here or the wizard would hand the user a link that undoes the request).
-_GMAIL_CONFIRMATION_LINK_RE = re.compile(r"https://mail-settings\.google\.com/mail/vf-\S+")
+_GMAIL_CONFIRMATION_LINK_RE = re.compile(r"https://mail[a-z.-]*\.google\.com/mail/vf-\S+")
 
 
 class ClassifyResult(BaseModel):

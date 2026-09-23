@@ -33,6 +33,14 @@ def test_detects_confirmation_link_from_real_template() -> None:
     assert link.startswith("https://mail-settings.google.com/mail/vf-")
 
 
+def test_detects_confirmation_link_on_the_other_real_host_variant() -> None:
+    # Same Gmail account, a different confirmation attempt minutes apart, used
+    # mail.google.com instead of mail-settings.google.com — both are real, both must match.
+    body = "please click the link below to confirm the request:\n\nhttps://mail.google.com/mail/vf-abcXYZ123\n"
+    link = detect_gmail_confirmation_link("Gmail Forwarding Confirmation", body)
+    assert link == "https://mail.google.com/mail/vf-abcXYZ123"
+
+
 def test_does_not_return_the_cancel_link() -> None:
     link = detect_gmail_confirmation_link("(Gmail Forwarding Confirmation - Receive Mail from humanrav@gmail.com", GMAIL_CONFIRMATION_BODY)
     assert "/mail/uf-" not in (link or "")

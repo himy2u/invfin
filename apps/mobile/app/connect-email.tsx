@@ -99,7 +99,7 @@ export default function ConnectEmailScreen() {
           .limit(1)
           .maybeSingle();
         if (!cancelled && data) {
-          const match = data.body.match(/(https:\/\/mail-settings\.google\.com\/mail\/vf-\S+)/);
+          const match = data.body.match(/(https:\/\/mail[a-z.-]*\.google\.com\/mail\/vf-\S+)/);
           if (match) setConfirmationLink(match[1]);
         }
       }
