@@ -129,6 +129,19 @@ class FakeAuthAdmin:
 class FakeAuth:
     admin = FakeAuthAdmin()
 
+    # Only "valid-user-token" mapping to "u1" is recognized — everything else simulates what
+    # Supabase's real /auth/v1/user endpoint does for a bad/expired token: reject it.
+    def get_user(self, jwt):
+        class _User:
+            id = "u1"
+
+        class _Response:
+            user = _User()
+
+        if jwt == "valid-user-token":
+            return _Response()
+        return None
+
 
 class FakeClient:
     def __init__(self, store: dict, rpc_results: dict):
@@ -204,6 +217,30 @@ def test_inbound_email_relays_gmail_confirmation_link():
     assert response.status_code == 200
     assert response.json() == {"status": "confirmation_relayed"}
     assert "https://mail-settings.google.com/mail/vf-abc123" in store["notifications"]["inserts"][0]["body"]
+
+
+def test_send_test_bill_rejects_invalid_session():
+    client, _ = _build_app({}, {})
+    response = client.post("/send-test-bill", headers={"Authorization": "Bearer not-a-real-token"})
+    assert response.status_code == 401
+
+
+def test_send_test_bill_rejects_when_detection_not_enabled():
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": False}]}}
+    client, _ = _build_app(store, {})
+    response = client.post("/send-test-bill", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 400
+
+
+def test_send_test_bill_enqueues_for_the_authenticated_users_own_address():
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, fake_client = _build_app(store, {})
+    response = client.post("/send-test-bill", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    queued_row = store["inbound_email_queue"]["inserts"][0]
+    assert queued_row["forwarding_token"] == "abc123"
+    assert queued_row["user_id"] == "u1"
 
 
 def test_inbound_email_ignored_when_detection_disabled():

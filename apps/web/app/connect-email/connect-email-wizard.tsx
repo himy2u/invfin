@@ -47,6 +47,7 @@ export function ConnectEmailWizard({
   const [sourceEmail, setSourceEmail] = useState(initial.sourceEmail ?? "");
   const [acknowledged, setAcknowledged] = useState(false);
   const [confirmationLink, setConfirmationLink] = useState<string | null>(null);
+  const [confirmClicked, setConfirmClicked] = useState(false);
   const [hasDetectedBill, setHasDetectedBill] = useState(false);
   const [recentBills, setRecentBills] = useState<
     { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; status: string; reminder_days_before: number }[]
@@ -248,18 +249,23 @@ export function ConnectEmailWizard({
               </div>
             )}
 
-            {confirmationLink ? (
+            {confirmationLink && !confirmClicked ? (
               <div className="rounded-lg border border-teal-200 bg-teal-50 p-3" data-testid="confirmation-link">
                 <p className="mb-2 text-xs text-teal-700">Gmail needs you to confirm this request:</p>
                 <a
                   href={confirmationLink}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => setConfirmClicked(true)}
                   className="inline-block rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800"
                 >
                   Confirm forwarding in Gmail →
                 </a>
               </div>
+            ) : confirmClicked ? (
+              <p className="text-sm font-medium text-teal-700" data-testid="already-detecting">
+                ✓ Confirmed in Gmail. Forward a bill to test it below.
+              </p>
             ) : hasDetectedBill ? (
               <p className="text-sm font-medium text-teal-700" data-testid="already-detecting">
                 ✓ Already detecting bills, working whether or not you confirm this in Gmail.
@@ -356,8 +362,8 @@ export function ConnectEmailWizard({
           <StatusLine done={enabled} active={!enabled} label="Detection turned on" />
           <StatusLine done={!!forwardingAddress} active={enabled && !forwardingAddress} label="Address generated" />
           <StatusLine
-            done={hasDetectedBill || !!confirmationLink}
-            active={enabled && !hasDetectedBill && !confirmationLink}
+            done={hasDetectedBill || confirmClicked || !!confirmationLink}
+            active={enabled && !hasDetectedBill && !confirmClicked && !confirmationLink}
             label="Added to Gmail"
           />
           <StatusLine done={hasDetectedBill} active={enabled && !!confirmationLink && !hasDetectedBill} label="First bill detected" />

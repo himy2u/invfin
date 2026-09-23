@@ -1,11 +1,11 @@
 import asyncio
 import os
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import getaddresses
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from postgrest.exceptions import APIError
 from pydantic import BaseModel
 
@@ -24,6 +24,7 @@ from reminder_scheduling import reminder_due_today
 
 router = APIRouter()
 _security = HTTPBasic()
+_bearer = HTTPBearer()
 
 # Postmark's inbound payload can carry a large attachment/body — same reasoning as
 # _MAX_UPLOAD_BYTES in main.py: unbounded size costs memory/CPU and Gemini spend with no
@@ -335,6 +336,48 @@ async def inbound_email(
         # the same queue on a timer — real risk once this runs with >1 instance). In the common
         # case this still starts within milliseconds of the response, so user-visible latency for
         # "bill shows up in Detected Bills" stays close to what it was before this change.
+        background_tasks.add_task(_process_queue_row_sync, result["queue_id"])
+    return result
+
+
+@router.post("/send-test-bill")
+async def send_test_bill(
+    background_tasks: BackgroundTasks, credentials: HTTPAuthorizationCredentials = Depends(_bearer)
+) -> dict[str, str]:
+    # Lets a user prove detection works without composing and forwarding a real email — same
+    # webhook path a real Postmark delivery takes, just authenticated by the user's own Supabase
+    # session instead of the Postmark Basic Auth credentials. Deliberately does NOT reuse those
+    # webhook credentials here: this endpoint is reachable from the mobile app, which (unlike the
+    # Next.js API route the web app uses for the same feature) has no server-side layer of its own
+    # to keep a shared secret out of the client bundle.
+    client = get_service_client()
+    try:
+        user_response = client.auth.get_user(credentials.credentials)
+    except Exception as exc:
+        raise HTTPException(401, "invalid session") from exc
+    if not user_response or not user_response.user:
+        raise HTTPException(401, "invalid session")
+    user_id = user_response.user.id
+
+    address_row = (
+        client.table("email_forwarding_addresses").select("forwarding_token, enabled").eq("user_id", user_id).execute()
+    )
+    if not address_row.data or not address_row.data[0]["enabled"]:
+        raise HTTPException(400, "email detection is not enabled yet")
+    token = address_row.data[0]["forwarding_token"]
+
+    due_date = (datetime.now(timezone.utc) + timedelta(days=14)).date().isoformat()
+    payload = InboundEmailPayload(
+        MessageID=f"self-test-{user_id}",
+        Subject="Your Sample Utility bill is ready",
+        TextBody=(
+            "Dear Customer,\n\nYour bill from Sample Utility Co. is now available.\n\n"
+            f"Amount Due: $42.00\nDue Date: {due_date}\n\nSample Utility Co.\n1 Test Street"
+        ),
+        OriginalRecipient=f"{token}@{_FORWARDING_DOMAIN}",
+    )
+    result = await asyncio.to_thread(_enqueue_inbound_email, payload)
+    if result.get("status") == "queued":
         background_tasks.add_task(_process_queue_row_sync, result["queue_id"])
     return result
 
