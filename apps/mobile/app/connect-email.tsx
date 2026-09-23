@@ -77,7 +77,7 @@ export default function ConnectEmailScreen() {
   }, []);
 
   // Polls for Gmail's forwarding-confirmation notification and for any newly detected bill.
-  // Confirming in Gmail is for the user's own benefit, not a prerequisite for detection — a live
+  // Confirming in Gmail is for the user's own benefit, not a prerequisite for detection. A live
   // naive-user test found that leaving this unresolved read as "setup failed" to a real user.
   useEffect(() => {
     if (!enabled || !userId) return;
@@ -145,7 +145,7 @@ export default function ConnectEmailScreen() {
   async function openConfirmationLink() {
     if (!confirmationLink) return;
     // Gmail's confirmation page opens outside the app (its own "Success!" screen) with no way for
-    // us to be notified when it closes, so this is optimistic — same reasoning as showing
+    // us to be notified when it closes, so this is optimistic. Same reasoning as showing
     // "already detecting" before Gmail's own confirmation ever arrives: the user's own action is
     // the only signal available, and waiting for one that will never come reads as broken.
     setConfirmClicked(true);
@@ -312,8 +312,19 @@ export default function ConnectEmailScreen() {
               </Pressable>
               {showGmailSteps && (
                 <View style={styles.gmailStepsBox}>
-                  <Text style={styles.stepListItem}>1. Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</Text>
-                  <Text style={styles.stepListItem}>2. Paste the address above and confirm.</Text>
+                  <Text style={styles.gmailStepsHeading}>1. Register the address (one-time)</Text>
+                  <Text style={styles.stepListItem}>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</Text>
+                  <Text style={styles.stepListItem}>Paste the address above and confirm it.</Text>
+                  <Text style={styles.gmailStepsHeading}>2. Forward only bills, not everything</Text>
+                  <Text style={styles.stepListItem}>
+                    Search Gmail: subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)
+                  </Text>
+                  <Text style={styles.stepListItem}>Tap the filter icon at the right of the search bar → &quot;Create filter&quot;.</Text>
+                  <Text style={styles.stepListItem}>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</Text>
+                  <Text style={styles.gmailStepsHint}>
+                    Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
+                    inbox, not just bills.
+                  </Text>
                 </View>
               )}
             </View>
@@ -495,6 +506,8 @@ const styles = StyleSheet.create({
   copyButtonText: { fontSize: 12, fontWeight: "600" },
   helpToggle: { fontSize: 12, color: colors.brand, textDecorationLine: "underline", marginTop: spacing.xs },
   gmailStepsBox: { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.xs },
+  gmailStepsHeading: { fontSize: 12, fontWeight: "700", color: colors.textPrimary, marginTop: spacing.sm },
+  gmailStepsHint: { fontSize: 11, color: colors.textMuted, marginTop: spacing.sm, lineHeight: 16 },
   codeBox: { marginTop: spacing.md, backgroundColor: colors.brandLight, borderWidth: 1, borderColor: colors.brandBorder, borderRadius: radius.md, padding: spacing.md },
   codeLabel: { fontSize: 11, color: colors.brandDark },
   confirmLinkButton: { marginTop: spacing.sm, backgroundColor: colors.brand, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
