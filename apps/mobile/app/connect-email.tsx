@@ -40,6 +40,7 @@ export default function ConnectEmailScreen() {
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
+  const [gmailStepsOpen, setGmailStepsOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeq = useRef(0);
@@ -114,6 +115,12 @@ export default function ConnectEmailScreen() {
       clearInterval(interval);
     };
   }, [enabled, confirmationLink, hasDetectedBill, userId]);
+
+  // Collapses the Gmail setup steps the first moment there's real evidence they're no longer
+  // needed. A returning user shouldn't have to re-read one-time setup instructions on every visit.
+  useEffect(() => {
+    if (confirmationLink || confirmClicked || hasDetectedBill) setGmailStepsOpen(false);
+  }, [confirmationLink, confirmClicked, hasDetectedBill]);
 
   async function getStarted() {
     if (!userId) return;
@@ -252,11 +259,6 @@ export default function ConnectEmailScreen() {
             autoCapitalize="none"
             testID="source-email-input"
           />
-          <View style={styles.privacyNote}>
-            <Text style={styles.privacyNoteText}>
-              Forwarded to a private address only your account can access, used only to detect and remind you about bills.
-            </Text>
-          </View>
           <Pressable
             style={styles.acknowledgeRow}
             onPress={() => setAcknowledged(!acknowledged)}
@@ -265,7 +267,9 @@ export default function ConnectEmailScreen() {
             <View style={[styles.checkbox, acknowledged && styles.checkboxChecked]}>
               {acknowledged && <Text style={styles.checkboxMark}>✓</Text>}
             </View>
-            <Text style={styles.acknowledgeText}>I acknowledge</Text>
+            <Text style={styles.acknowledgeText}>
+              I understand this address is private to my account, used only to detect and remind me about bills.
+            </Text>
           </Pressable>
           <Pressable
             style={[styles.primaryButton, (starting || !acknowledged || !sourceEmail.trim()) && styles.buttonDisabled]}
@@ -306,21 +310,26 @@ export default function ConnectEmailScreen() {
                   <Text style={styles.copyButtonText}>{copied ? "Copied!" : "Copy"}</Text>
                 </Pressable>
               </View>
-              <View style={styles.gmailStepsBox}>
-                <Text style={styles.gmailStepsHeading}>1. Register the address in Gmail (one-time)</Text>
-                <Text style={styles.stepListItem}>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</Text>
-                <Text style={styles.stepListItem}>Paste the address above and confirm it.</Text>
-                <Text style={styles.gmailStepsHeading}>2. Forward only bills, not everything</Text>
-                <Text style={styles.stepListItem}>
-                  Search Gmail: subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)
-                </Text>
-                <Text style={styles.stepListItem}>Tap the filter icon at the right of the search bar → &quot;Create filter&quot;.</Text>
-                <Text style={styles.stepListItem}>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</Text>
-                <Text style={styles.gmailStepsHint}>
-                  Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
-                  inbox, not just bills.
-                </Text>
-              </View>
+              <Pressable onPress={() => setGmailStepsOpen((v) => !v)}>
+                <Text style={styles.helpToggle}>{gmailStepsOpen ? "Hide Gmail setup steps" : "Show Gmail setup steps"}</Text>
+              </Pressable>
+              {gmailStepsOpen && (
+                <View style={styles.gmailStepsBox}>
+                  <Text style={styles.gmailStepsHeading}>1. Register the address (one-time)</Text>
+                  <Text style={styles.stepListItem}>
+                    Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address → paste it → confirm.
+                  </Text>
+                  <Text style={styles.gmailStepsHeading}>2. Forward only bills, not everything</Text>
+                  <Text style={styles.stepListItem}>
+                    Search: subject:(invoice OR bill OR statement OR receipt) → filter icon → Create filter → check
+                    &quot;Forward it to&quot; → pick the address → Create filter.
+                  </Text>
+                  <Text style={styles.gmailStepsHint}>
+                    For a bill already in your inbox: forward it manually once, Gmail filters only apply going
+                    forward.
+                  </Text>
+                </View>
+              )}
             </View>
           )}
 
@@ -333,24 +342,16 @@ export default function ConnectEmailScreen() {
             </View>
           ) : confirmClicked ? (
             <Text style={styles.alreadyWorkingText} testID="already-detecting">
-              ✓ Confirmed in Gmail. Forward a bill to test it below.
+              ✓ Confirmed in Gmail. Forward a bill to test it.
             </Text>
           ) : hasDetectedBill ? (
             <Text style={styles.alreadyWorkingText} testID="already-detecting">
-              ✓ Already detecting bills, working whether or not you confirm this in Gmail.
+              ✓ Detecting bills.
             </Text>
           ) : null}
 
-          <View style={styles.explainerBox}>
-            <Text style={styles.explainerText}>
-              We only see mail you forward, starting from when you turn this on. Nothing already in
-              your inbox gets scanned. Forward one real bill to the address above to test with real
-              content, or use the buttons below to check the plumbing with made-up data.
-            </Text>
-          </View>
-
           <View style={styles.testButtonRow}>
-            <View>
+            <View style={styles.testButtonWithStatus}>
               <Pressable
                 style={[styles.testButton, testStatus === "sending" && styles.buttonDisabled]}
                 onPress={sendTestBill}
@@ -361,28 +362,28 @@ export default function ConnectEmailScreen() {
               </Pressable>
               {testStatus === "sent" && (
                 <Text style={styles.testSentText} testID="test-bill-sent">
-                  ✓ Sent "Sample Utility Co." (not real), check Bills.
+                  ✓ Sent, check Bills
                 </Text>
               )}
-              {testStatus === "error" && <Text style={styles.error}>Test send failed. Try again.</Text>}
+              {testStatus === "error" && <Text style={styles.error}>Failed, try again</Text>}
             </View>
 
-            <View>
+            <View style={styles.testButtonWithStatus}>
               <Pressable
                 style={[styles.testButton, (reminderTestStatus === "sending" || !hasDetectedBill) && styles.buttonDisabled]}
                 onPress={sendTestReminder}
                 disabled={reminderTestStatus === "sending" || !hasDetectedBill}
                 testID="send-test-reminder-button"
               >
-                <Text style={styles.testButtonText}>{reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder now"}</Text>
+                <Text style={styles.testButtonText}>{reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder"}</Text>
               </Pressable>
               {reminderTestStatus === "sent" && (
                 <Text style={styles.testSentText} testID="test-reminder-sent">
-                  ✓ Sent via your channels below.
+                  ✓ Sent
                 </Text>
               )}
               {reminderTestStatus === "error" && (
-                <Text style={styles.error}>{hasDetectedBill ? "Test send failed. Try again." : "Detect a bill first."}</Text>
+                <Text style={styles.error}>{hasDetectedBill ? "Failed, try again" : "Detect a bill first"}</Text>
               )}
             </View>
           </View>
@@ -425,7 +426,7 @@ export default function ConnectEmailScreen() {
           <View style={styles.recentSection} testID="recently-detected">
             <Text style={styles.label}>Recently detected</Text>
             {recentBills.length === 0 ? (
-              <Text style={styles.stepHint}>Nothing yet.</Text>
+              <Text style={styles.stepHint}>Nothing yet. Only mail forwarded after setup counts.</Text>
             ) : (
               <>
                 {recentBills.map((b) => (
@@ -478,8 +479,6 @@ const styles = StyleSheet.create({
   onFor: { fontWeight: "700", color: colors.textPrimary },
   turnOffLink: { fontSize: 12, color: colors.textMuted, textDecorationLine: "underline" },
   label: { fontSize: 11, color: colors.textMuted, marginTop: spacing.sm, marginBottom: 4, fontWeight: "600" },
-  privacyNote: { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.sm },
-  privacyNoteText: { fontSize: 11, color: colors.textMuted, lineHeight: 16 },
   acknowledgeRow: { flexDirection: "row", alignItems: "center", gap: spacing.xs, marginTop: spacing.sm },
   checkbox: { width: 18, height: 18, borderRadius: 4, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center" },
   checkboxChecked: { backgroundColor: colors.brand, borderColor: colors.brand },
@@ -505,12 +504,12 @@ const styles = StyleSheet.create({
   codeLabel: { fontSize: 11, color: colors.brandDark },
   confirmLinkButton: { marginTop: spacing.sm, backgroundColor: colors.brand, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
   confirmLinkButtonText: { color: colors.textOnBrand, fontWeight: "700", fontSize: 13 },
-  explainerBox: { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm, marginTop: spacing.md },
-  explainerText: { fontSize: 11, color: colors.textMuted, lineHeight: 16 },
+  helpToggle: { fontSize: 12, color: colors.brand, textDecorationLine: "underline", marginTop: spacing.xs },
   testButtonRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.md, marginTop: spacing.md },
+  testButtonWithStatus: { flexDirection: "row", alignItems: "center", gap: spacing.sm, flexWrap: "wrap" },
   testButton: { borderWidth: 1, borderColor: colors.brandBorder, backgroundColor: colors.surface, borderRadius: radius.sm, paddingVertical: 10, paddingHorizontal: spacing.md, alignSelf: "flex-start" },
   testButtonText: { color: colors.brand, fontWeight: "700", fontSize: 13 },
-  testSentText: { fontSize: 12, color: colors.brand, marginTop: spacing.xs },
+  testSentText: { fontSize: 12, color: colors.brand },
   reminderRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-end", gap: spacing.lg, marginTop: spacing.lg, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.border },
   channelChip: { borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 6 },
   channelChipText: { fontSize: 12, color: colors.textMuted },

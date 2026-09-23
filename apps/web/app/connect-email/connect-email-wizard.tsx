@@ -56,6 +56,7 @@ export function ConnectEmailWizard({
   const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [copied, setCopied] = useState(false);
+  const [gmailStepsOpen, setGmailStepsOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeq = useRef(0);
@@ -166,6 +167,13 @@ export function ConnectEmailWizard({
     };
   }, [enabled, confirmationLink, hasDetectedBill, supabase, userId]);
 
+  // Collapses the Gmail setup steps the first moment there's real evidence they're no longer
+  // needed (a confirmation link arrived, was clicked, or a bill was detected). A returning user
+  // shouldn't have to re-read one-time setup instructions on every visit. Still user-toggleable.
+  useEffect(() => {
+    if (confirmationLink || confirmClicked || hasDetectedBill) setGmailStepsOpen(false);
+  }, [confirmationLink, confirmClicked, hasDetectedBill]);
+
   function saveReminderPrefs(days: number, nextChannels: Channels) {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     const mySeq = ++saveSeq.current;
@@ -199,17 +207,15 @@ export function ConnectEmailWizard({
               data-testid="source-email-input"
               className="w-full max-w-xs rounded border border-zinc-300 px-3 py-2 text-sm"
             />
-            <p className="mt-3 max-w-sm rounded-lg bg-zinc-50 p-3 text-xs text-zinc-500">
-              Forwarded to a private address only your account can access, used only to detect and remind you about bills.
-            </p>
-            <label className="mt-2 flex items-center gap-2 text-xs text-zinc-600">
+            <label className="mt-3 flex items-start gap-2 text-xs text-zinc-600">
               <input
                 type="checkbox"
                 checked={acknowledged}
                 onChange={(e) => setAcknowledged(e.target.checked)}
                 data-testid="privacy-acknowledge-checkbox"
+                className="mt-0.5"
               />
-              I acknowledge
+              I understand this address is private to my account, used only to detect and remind me about bills.
             </label>
             <button
               onClick={getStarted}
@@ -250,25 +256,27 @@ export function ConnectEmailWizard({
                     {copied ? "Copied!" : "Copy"}
                   </button>
                 </div>
-                <div className="mt-3 rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">
-                  <p className="font-medium text-zinc-700">1. Register the address in Gmail (one-time)</p>
-                  <ol className="mt-1 list-decimal space-y-1 pl-5">
-                    <li>Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address.</li>
-                    <li>Paste the address above and confirm it.</li>
-                  </ol>
-                  <p className="mt-3 font-medium text-zinc-700">2. Forward only bills, not everything</p>
-                  <ol className="mt-1 list-decimal space-y-1 pl-5">
-                    <li>
-                      In Gmail&apos;s search bar, search: <code className="rounded bg-white px-1 py-0.5">subject:(invoice OR bill OR statement OR receipt OR &quot;payment due&quot;)</code>
-                    </li>
-                    <li>Click the filter icon (⚙ or ▾) at the right of the search bar → &quot;Create filter&quot;.</li>
-                    <li>Check &quot;Forward it to&quot;, pick the address above, then &quot;Create filter&quot;.</li>
-                  </ol>
-                  <p className="mt-2 text-zinc-400">
-                    Skip Gmail&apos;s own &quot;forward all mail&quot; option, that sends us everything in your
-                    inbox, not just bills.
-                  </p>
-                </div>
+                <button
+                  onClick={() => setGmailStepsOpen((v) => !v)}
+                  className="mt-2 text-xs text-teal-700 underline"
+                >
+                  {gmailStepsOpen ? "Hide Gmail setup steps" : "Show Gmail setup steps"}
+                </button>
+                {gmailStepsOpen && (
+                  <div className="mt-2 rounded-lg bg-zinc-50 p-3 text-xs text-zinc-600">
+                    <p className="font-medium text-zinc-700">1. Register the address (one-time)</p>
+                    <p className="mt-1">Gmail → Settings → Forwarding and POP/IMAP → Add a forwarding address → paste it → confirm.</p>
+                    <p className="mt-3 font-medium text-zinc-700">2. Forward only bills, not everything</p>
+                    <p className="mt-1">
+                      Search: <code className="rounded bg-white px-1 py-0.5">subject:(invoice OR bill OR statement OR receipt)</code>
+                      {" "}→ filter icon → Create filter → check &quot;Forward it to&quot; → pick the address → Create filter.
+                    </p>
+                    <p className="mt-2 text-zinc-400">
+                      For a bill already in your inbox: forward it manually once, Gmail filters only apply going
+                      forward.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -287,58 +295,45 @@ export function ConnectEmailWizard({
               </div>
             ) : confirmClicked ? (
               <p className="text-sm font-medium text-teal-700" data-testid="already-detecting">
-                ✓ Confirmed in Gmail. Forward a bill to test it below.
+                ✓ Confirmed in Gmail. Forward a bill to test it.
               </p>
             ) : hasDetectedBill ? (
               <p className="text-sm font-medium text-teal-700" data-testid="already-detecting">
-                ✓ Already detecting bills, working whether or not you confirm this in Gmail.
+                ✓ Detecting bills.
               </p>
             ) : null}
 
-            <div className="rounded-lg bg-zinc-50 p-3 text-xs text-zinc-500">
-              We only see mail you forward, starting from when you turn this on. Nothing already in
-              your inbox gets scanned. Forward one real bill to the address above to test with real
-              content, or use the buttons below to check the plumbing with made-up data.
-            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={sendTestBill}
+                disabled={testStatus === "sending"}
+                data-testid="send-test-bill-button"
+                className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+              >
+                {testStatus === "sending" ? "Sending…" : "Send a fake test bill"}
+              </button>
+              {testStatus === "sent" && (
+                <span className="text-xs text-teal-700" data-testid="test-bill-sent">
+                  ✓ Sent, check Bills
+                </span>
+              )}
+              {testStatus === "error" && <span className="text-xs text-red-600">Failed, try again</span>}
 
-            <div className="flex flex-wrap gap-3">
-              <div>
-                <button
-                  onClick={sendTestBill}
-                  disabled={testStatus === "sending"}
-                  data-testid="send-test-bill-button"
-                  className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
-                >
-                  {testStatus === "sending" ? "Sending…" : "Send a fake test bill"}
-                </button>
-                {testStatus === "sent" && (
-                  <p className="mt-2 text-xs text-teal-700" data-testid="test-bill-sent">
-                    ✓ Sent "Sample Utility Co." (not a real bill), check Bills in a few seconds.
-                  </p>
-                )}
-                {testStatus === "error" && <p className="mt-2 text-xs text-red-600">Test send failed. Try again.</p>}
-              </div>
-
-              <div>
-                <button
-                  onClick={sendTestReminder}
-                  disabled={reminderTestStatus === "sending" || !hasDetectedBill}
-                  data-testid="send-test-reminder-button"
-                  className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
-                >
-                  {reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder now"}
-                </button>
-                {reminderTestStatus === "sent" && (
-                  <p className="mt-2 text-xs text-teal-700" data-testid="test-reminder-sent">
-                    ✓ Sent via your enabled channels below, for your most recently detected bill.
-                  </p>
-                )}
-                {reminderTestStatus === "error" && (
-                  <p className="mt-2 text-xs text-red-600">
-                    {hasDetectedBill ? "Test send failed. Try again." : "Detect a bill first."}
-                  </p>
-                )}
-              </div>
+              <button
+                onClick={sendTestReminder}
+                disabled={reminderTestStatus === "sending" || !hasDetectedBill}
+                data-testid="send-test-reminder-button"
+                title={hasDetectedBill ? undefined : "Detect a bill first"}
+                className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+              >
+                {reminderTestStatus === "sending" ? "Sending…" : "Send a test reminder"}
+              </button>
+              {reminderTestStatus === "sent" && (
+                <span className="text-xs text-teal-700" data-testid="test-reminder-sent">
+                  ✓ Sent
+                </span>
+              )}
+              {reminderTestStatus === "error" && <span className="text-xs text-red-600">Failed, try again</span>}
             </div>
 
             <div className="flex flex-wrap items-end gap-6 border-t border-zinc-100 pt-5">
@@ -380,7 +375,9 @@ export function ConnectEmailWizard({
             <div data-testid="recently-detected">
               <p className="text-xs font-medium text-zinc-600">Recently detected</p>
               {recentBills.length === 0 ? (
-                <p className="mt-1 text-xs text-zinc-400">Nothing yet.</p>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Nothing yet. Only mail forwarded after setup counts, nothing older gets scanned.
+                </p>
               ) : (
                 <div className="mt-2 flex flex-col gap-2">
                   {recentBills.map((b) => (
