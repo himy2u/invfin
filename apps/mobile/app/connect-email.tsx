@@ -37,8 +37,9 @@ export default function ConnectEmailScreen() {
     { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; status: string; reminder_days_before: number }[]
   >([]);
   const [starting, setStarting] = useState(false);
-  const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [checkStatus, setCheckStatus] = useState<"idle" | "checking" | "done" | "error">("idle");
+  const [checkResult, setCheckResult] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [gmailStepsOpen, setGmailStepsOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -158,22 +159,32 @@ export default function ConnectEmailScreen() {
     await Linking.openURL(confirmationLink);
   }
 
-  async function sendTestBill() {
-    setTestStatus("sending");
+  // Runs the real pipeline on demand against this user's own forwarded mail — see the same
+  // function in apps/web's wizard. It creates nothing of its own; every count it reports came out
+  // of a real email the user actually forwarded.
+  async function checkForNewBills() {
+    setCheckStatus("checking");
+    setCheckResult(null);
     try {
       const { data } = await supabase.auth.getSession();
       const token = data.session?.access_token;
       if (!token) throw new Error("not signed in");
-      const res = await fetch(`${AGENT_SERVICE_URL}/send-test-bill`, {
+      const res = await fetch(`${AGENT_SERVICE_URL}/check-new-bills`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
-      // "queued" is the only outcome that actually creates a bill. The endpoint answers 200 for
-      // "duplicate"/"ignored"/"dead_letter" too. Mirrors apps/web's wizard.
-      const body = await res.json().catch(() => null);
-      setTestStatus(res.ok && body?.status === "queued" ? "sent" : "error");
+      if (!res.ok) throw new Error("check failed");
+      const body: { checked: number; bills_detected: number } = await res.json();
+      setCheckStatus("done");
+      setCheckResult(
+        body.bills_detected > 0
+          ? `✓ Found ${body.bills_detected} new bill${body.bills_detected === 1 ? "" : "s"}`
+          : body.checked > 0
+            ? "✓ Checked — nothing new to add"
+            : "✓ Up to date. Forward a bill, then check again.",
+      );
     } catch {
-      setTestStatus("error");
+      setCheckStatus("error");
     }
   }
 
@@ -356,19 +367,19 @@ export default function ConnectEmailScreen() {
           <View style={styles.testButtonRow}>
             <View style={styles.testButtonWithStatus}>
               <Pressable
-                style={[styles.testButton, testStatus === "sending" && styles.buttonDisabled]}
-                onPress={sendTestBill}
-                disabled={testStatus === "sending"}
-                testID="send-test-bill-button"
+                style={[styles.testButton, checkStatus === "checking" && styles.buttonDisabled]}
+                onPress={checkForNewBills}
+                disabled={checkStatus === "checking"}
+                testID="check-new-bills-button"
               >
-                <Text style={styles.testButtonText}>{testStatus === "sending" ? "Sending…" : "Send a fake test bill"}</Text>
+                <Text style={styles.testButtonText}>{checkStatus === "checking" ? "Checking…" : "Check for new bills"}</Text>
               </Pressable>
-              {testStatus === "sent" && (
-                <Text style={styles.testSentText} testID="test-bill-sent">
-                  ✓ Sent, check Bills
+              {checkResult && (
+                <Text style={styles.testSentText} testID="check-new-bills-result">
+                  {checkResult}
                 </Text>
               )}
-              {testStatus === "error" && <Text style={styles.error}>Failed, try again</Text>}
+              {checkStatus === "error" && <Text style={styles.error}>Check failed, try again</Text>}
             </View>
 
             <View style={styles.testButtonWithStatus}>

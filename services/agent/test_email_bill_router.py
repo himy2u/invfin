@@ -1,3 +1,4 @@
+import base64
 import os
 
 # Force-set (not setdefault) — these tests assert against a specific username/password pair, so
@@ -166,7 +167,21 @@ class FakeClient:
     def rpc(self, name, params):
         if name == "claim_inbound_email_queue_row":
             return FakeRpcCall(self._claim_queue_row(params["p_id"]))
+        if name == "claim_inbound_email_queue_batch_for_user":
+            return FakeRpcCall(self._claim_queue_batch_for_user(params["p_user_id"]))
         return FakeRpcCall(FakeResult(self.rpc_results.get(name)))
+
+    def _claim_queue_batch_for_user(self, user_id):
+        # Mirrors the real RPC's two load-bearing properties: it claims only rows belonging to the
+        # calling user (never another tenant's), and only ones the automatic path hasn't finished.
+        rows = self.store.get("inbound_email_queue", {"rows": []}).get("rows", [])
+        claimed = []
+        for r in rows:
+            if r.get("user_id") == user_id and r.get("status") == "pending":
+                r["status"] = "processing"
+                r["attempts"] = r.get("attempts", 0) + 1
+                claimed.append(dict(r))
+        return FakeResult(claimed)
 
     def _claim_queue_row(self, row_id):
         rows = self.store.get("inbound_email_queue", {"rows": []}).get("rows", [])
@@ -228,49 +243,6 @@ def test_inbound_email_relays_gmail_confirmation_link():
     assert response.status_code == 200
     assert response.json() == {"status": "confirmation_relayed"}
     assert "https://mail-settings.google.com/mail/vf-abc123" in store["notifications"]["inserts"][0]["body"]
-
-
-def test_send_test_bill_rejects_invalid_session():
-    client, _ = _build_app({}, {})
-    response = client.post("/send-test-bill", headers={"Authorization": "Bearer not-a-real-token"})
-    assert response.status_code == 401
-
-
-def test_send_test_bill_rejects_when_detection_not_enabled():
-    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": False}]}}
-    client, _ = _build_app(store, {})
-    response = client.post("/send-test-bill", headers={"Authorization": "Bearer valid-user-token"})
-    assert response.status_code == 400
-
-
-def test_send_test_bill_enqueues_for_the_authenticated_users_own_address():
-    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
-    client, fake_client = _build_app(store, {})
-    response = client.post("/send-test-bill", headers={"Authorization": "Bearer valid-user-token"})
-    assert response.status_code == 200
-    assert response.json()["status"] == "queued"
-    queued_row = store["inbound_email_queue"]["inserts"][0]
-    assert queued_row["forwarding_token"] == "abc123"
-    assert queued_row["user_id"] == "u1"
-
-
-def test_send_test_bill_twice_enqueues_twice():
-    # Regression: MessageID used to be a fixed f"self-test-{user_id}", which is the inbound queue's
-    # idempotency key. The first click consumed it permanently, so every later click conflicted,
-    # returned {"status": "duplicate"} with HTTP 200, and created no bill, while the web and mobile
-    # UIs both read that 200 as success and displayed "✓ Sent, check Bills".
-    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
-    client, _ = _build_app(store, {})
-    headers = {"Authorization": "Bearer valid-user-token"}
-
-    first = client.post("/send-test-bill", headers=headers)
-    second = client.post("/send-test-bill", headers=headers)
-
-    assert first.json()["status"] == "queued"
-    assert second.json()["status"] == "queued"
-    inserts = store["inbound_email_queue"]["inserts"]
-    assert len(inserts) == 2
-    assert inserts[0]["message_id"] != inserts[1]["message_id"]
 
 
 def test_send_test_reminder_rejects_invalid_session():
@@ -445,3 +417,285 @@ def test_extract_claimed_row_handles_list_dict_and_empty():
     assert email_bill_router._extract_claimed_row([]) is None
     assert email_bill_router._extract_claimed_row([{"id": "x"}]) == {"id": "x"}
     assert email_bill_router._extract_claimed_row({"id": "x"}) == {"id": "x"}
+
+
+# --- PDF/image attachment fallback -------------------------------------------------------------
+#
+# The gap these cover, found against a real forwarded email ("Fwd: Contributie - factuur 40023635",
+# 2026-09-23): the pipeline read only TextBody, that email's body said nothing but "herewith you
+# receive an invoice," and so it processed cleanly to 'done' and created no bill — every number was
+# in the attached PDF it never looked at.
+
+_PDF_BYTES = b"%PDF-1.4 pretend this is a one-page invoice"
+_PDF_B64 = base64.b64encode(_PDF_BYTES).decode()
+
+
+def _recording_detection(monkeypatch, classify, extract):
+    """Swaps in stub classify/extract and records the `document` argument each call received, which
+    is the thing these tests are actually about: WHICH calls got the attachment, not just that a
+    bill came out the other end."""
+    calls = {"classify": [], "extract": []}
+
+    def _classify(_api_key, subject, body_text, document=None):
+        calls["classify"].append(document)
+        return classify(subject, body_text, document)
+
+    def _extract(_api_key, subject, body_text, document=None):
+        calls["extract"].append(document)
+        return extract(subject, body_text, document)
+
+    monkeypatch.setattr(email_bill_router, "classify_bill_email", _classify)
+    monkeypatch.setattr(email_bill_router, "extract_bill_from_email", _extract)
+    return calls
+
+
+def _bill_result(vendor="Vitens", due="2026-10-15", amount=61.4, currency="EUR"):
+    return BillExtractionResult(
+        vendor_name=vendor,
+        currency=currency,
+        due_date=due,
+        line_items=[LineItemDraft(description="Amount due", quantity=1, unit_price=amount)],
+    )
+
+
+def test_inbound_email_stores_the_first_pdf_and_ignores_other_attachments():
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {})
+    response = client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att1",
+            "Subject": "Contributie - factuur 40023635",
+            "TextBody": "herewith you receive an invoice",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [
+                {"Name": "invite.ics", "Content": base64.b64encode(b"BEGIN:VCALENDAR").decode(), "ContentType": "text/calendar"},
+                {"Name": "factuur.pdf", "Content": _PDF_B64, "ContentType": 'application/pdf; name="factuur.pdf"'},
+                {"Name": "logo.png", "Content": base64.b64encode(b"\x89PNG").decode(), "ContentType": "image/png"},
+            ],
+        },
+        auth=AUTH,
+    )
+    assert response.status_code == 200
+    row = store["inbound_email_queue"]["rows"][0]
+    assert row["attachment_name"] == "factuur.pdf"
+    # The ContentType's `; name=` parameter must be stripped — Gemini rejects it as a mime type.
+    assert row["attachment_mime_type"] == "application/pdf"
+    assert row["attachment_content"] == _PDF_B64
+
+
+def test_inbound_email_skips_an_oversized_attachment():
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {})
+    huge = base64.b64encode(b"x" * (email_bill_router._MAX_ATTACHMENT_BYTES + 1)).decode()
+    client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att2",
+            "Subject": "bill",
+            "TextBody": "see attached",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [{"Name": "huge.pdf", "Content": huge, "ContentType": "application/pdf"}],
+        },
+        auth=AUTH,
+    )
+    row = store["inbound_email_queue"]["rows"][0]
+    assert row["attachment_content"] is None
+
+
+def test_attachment_bill_is_detected_when_the_body_text_has_no_numbers(monkeypatch):
+    # The headline case. Body-only classification says "not a bill" (correctly — there is nothing
+    # payable in that text); the attachment is what makes it one.
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {"create_detected_bill": "bill-pdf-1"})
+    calls = _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, document: ClassifyResult(
+            is_bill=document is not None, confidence=0.95 if document is not None else 0.1
+        ),
+        extract=lambda _s, _b, _document: _bill_result(),
+    )
+
+    response = client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att3",
+            "Subject": "Contributie - factuur 40023635",
+            "TextBody": "Beste lid,\n\nHierbij ontvangt u een factuur.",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [{"Name": "factuur.pdf", "Content": _PDF_B64, "ContentType": "application/pdf"}],
+        },
+        auth=AUTH,
+    )
+    assert response.json()["status"] == "queued"
+
+    # Cheap body-only call first, then the attachment call — never the attachment first.
+    assert calls["classify"][0] is None
+    assert calls["classify"][1].mime_type == "application/pdf"
+    assert calls["classify"][1].data == _PDF_BYTES
+    # Extraction saw the document too, otherwise it would have nothing to read the amount from.
+    assert calls["extract"][0].data == _PDF_BYTES
+
+    notification = next(n for n in store["notifications"]["inserts"] if n["type"] == "bill_detected")
+    assert notification["related_bill_id"] == "bill-pdf-1"
+    assert store["inbound_email_queue"]["rows"][0]["status"] == "done"
+
+
+def test_body_text_bill_never_pays_for_an_attachment_call(monkeypatch):
+    # Attachment parsing is a fallback, not always-on: an email whose body already classifies and
+    # extracts cleanly must cost exactly the two text calls it cost before this feature existed.
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {"create_detected_bill": "bill-body-1"})
+    calls = _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, _document: ClassifyResult(is_bill=True, confidence=0.95),
+        extract=lambda _s, _b, _document: _bill_result(vendor="British Gas", currency="GBP"),
+    )
+
+    client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att4",
+            "Subject": "Your British Gas bill",
+            "TextBody": "Amount due: GBP 61.40. Due date: 2026-10-15.",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [{"Name": "bill.pdf", "Content": _PDF_B64, "ContentType": "application/pdf"}],
+        },
+        auth=AUTH,
+    )
+    assert calls["classify"] == [None]
+    assert calls["extract"] == [None]
+
+
+def test_attachment_is_retried_when_body_text_extraction_fails(monkeypatch):
+    # Classifier confident from the body (it names a vendor and says a payment is due), but the
+    # body has no amount, so the text-only extraction can't produce a bill. The PDF is the retry.
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {"create_detected_bill": "bill-retry-1"})
+
+    def _extract(_subject, _body, document):
+        if document is None:
+            raise BillExtractionFailed("no amount in the body text")
+        return _bill_result(vendor="Vattenfall Energie")
+
+    calls = _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, _document: ClassifyResult(is_bill=True, confidence=0.9),
+        extract=_extract,
+    )
+
+    client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att5",
+            "Subject": "Rechnung von Vattenfall",
+            "TextBody": "Ihre Rechnung finden Sie im Anhang.",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [{"Name": "rechnung.pdf", "Content": _PDF_B64, "ContentType": "application/pdf"}],
+        },
+        auth=AUTH,
+    )
+    assert calls["extract"][0] is None
+    assert calls["extract"][1].data == _PDF_BYTES
+    assert store["inbound_email_queue"]["rows"][0]["status"] == "done"
+
+
+def test_non_bill_with_no_attachment_still_produces_nothing(monkeypatch):
+    # Regression guard for the path that already worked: a newsletter with no attachment must not
+    # start producing bills now that a fallback exists.
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {"create_detected_bill": "should-not-be-created"})
+    calls = _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, _document: ClassifyResult(is_bill=False, confidence=0.98),
+        extract=lambda _s, _b, _document: _bill_result(),
+    )
+
+    client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att6",
+            "Subject": "Your weekly newsletter",
+            "TextBody": "Here is what happened this week.",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+        },
+        auth=AUTH,
+    )
+    assert calls["classify"] == [None]
+    assert calls["extract"] == []
+    assert store["inbound_email_queue"]["rows"][0]["status"] == "done"
+    assert "notifications" not in store
+
+
+def test_non_bill_with_an_attachment_still_produces_nothing(monkeypatch):
+    # A receipt or a shipping notice WITH a PDF attached must still be rejected — the fallback
+    # exists to read a bill that's in an attachment, not to turn every attachment into a bill.
+    store = {"email_forwarding_addresses": {"rows": [{"forwarding_token": "abc123", "user_id": "u1", "enabled": True}]}}
+    client, _ = _build_app(store, {"create_detected_bill": "should-not-be-created"})
+    calls = _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, _document: ClassifyResult(is_bill=False, confidence=0.96),
+        extract=lambda _s, _b, _document: _bill_result(),
+    )
+
+    client.post(
+        "/inbound-email",
+        json={
+            "MessageID": "att7",
+            "Subject": "Your receipt from Acme",
+            "TextBody": "Thanks for your payment. Receipt attached.",
+            "OriginalRecipient": "abc123@inbox.invfin.app",
+            "Attachments": [{"Name": "receipt.pdf", "Content": _PDF_B64, "ContentType": "application/pdf"}],
+        },
+        auth=AUTH,
+    )
+    # Both classify calls ran (body, then attachment) and both said no — so nothing was extracted.
+    assert calls["classify"][0] is None
+    assert calls["classify"][1].data == _PDF_BYTES
+    assert calls["extract"] == []
+    assert "notifications" not in store
+
+
+# --- "Check for new bills" ----------------------------------------------------------------------
+
+
+def test_check_new_bills_rejects_invalid_session():
+    client, _ = _build_app({}, {})
+    response = client.post("/check-new-bills", headers={"Authorization": "Bearer not-a-real-token"})
+    assert response.status_code == 401
+
+
+def test_check_new_bills_reports_zero_when_there_is_nothing_outstanding():
+    # The honest empty case: the button must report nothing rather than manufacture something.
+    client, _ = _build_app({"inbound_email_queue": {"rows": [], "inserts": []}}, {})
+    response = client.post("/check-new-bills", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 200
+    assert response.json() == {"checked": 0, "bills_detected": 0}
+
+
+def test_check_new_bills_processes_only_the_callers_own_queued_email(monkeypatch):
+    store = {
+        "inbound_email_queue": {
+            "rows": [
+                {"id": "q1", "user_id": "u1", "subject": "Facture Veolia", "body_text": "Montant: 48,20 EUR", "message_id": "mine", "status": "pending", "attempts": 0},
+                {"id": "q2", "user_id": "someone-else", "subject": "Factura", "body_text": "Importe: 30 EUR", "message_id": "theirs", "status": "pending", "attempts": 0},
+            ],
+            "inserts": [],
+        }
+    }
+    client, _ = _build_app(store, {"create_detected_bill": "bill-checked-1"})
+    _recording_detection(
+        monkeypatch,
+        classify=lambda _s, _b, _document: ClassifyResult(is_bill=True, confidence=0.95),
+        extract=lambda _s, _b, _document: _bill_result(vendor="Veolia Eau"),
+    )
+
+    response = client.post("/check-new-bills", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 200
+    assert response.json() == {"checked": 1, "bills_detected": 1}
+
+    rows = {r["id"]: r for r in store["inbound_email_queue"]["rows"]}
+    assert rows["q1"]["status"] == "done"
+    # The other tenant's row was never claimed, so its attempt count is untouched.
+    assert rows["q2"]["status"] == "pending"
+    assert rows["q2"]["attempts"] == 0

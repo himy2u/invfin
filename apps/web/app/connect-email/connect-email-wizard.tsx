@@ -53,8 +53,9 @@ export function ConnectEmailWizard({
     { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; status: string; reminder_days_before: number }[]
   >([]);
   const [starting, setStarting] = useState(false);
-  const [testStatus, setTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [checkStatus, setCheckStatus] = useState<"idle" | "checking" | "done" | "error">("idle");
+  const [checkResult, setCheckResult] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [gmailStepsOpen, setGmailStepsOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -88,17 +89,33 @@ export function ConnectEmailWizard({
     setForwardingToken(data.forwarding_token);
   }
 
-  async function sendTestBill() {
-    setTestStatus("sending");
+  // Runs the real pipeline on demand against this user's own forwarded mail: anything sitting in
+  // the inbound queue that the automatic path hasn't finished gets classified and extracted now.
+  // It creates nothing of its own, so every count it reports — and every bill that then appears in
+  // the list below — came out of a real email the user actually forwarded.
+  async function checkForNewBills() {
+    setCheckStatus("checking");
+    setCheckResult(null);
     try {
-      const res = await fetch("/api/send-test-bill", { method: "POST" });
-      // "queued" is the only outcome that actually creates a bill. The webhook answers 200 for
-      // "duplicate"/"ignored"/"dead_letter" too, so res.ok alone used to render "✓ Sent, check
-      // Bills" over a send that did nothing at all.
-      const body = await res.json().catch(() => null);
-      setTestStatus(res.ok && body?.status === "queued" ? "sent" : "error");
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error("not signed in");
+      const res = await fetch(`${process.env.NEXT_PUBLIC_AGENT_SERVICE_URL}/check-new-bills`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("check failed");
+      const body: { checked: number; bills_detected: number } = await res.json();
+      setCheckStatus("done");
+      setCheckResult(
+        body.bills_detected > 0
+          ? `✓ Found ${body.bills_detected} new bill${body.bills_detected === 1 ? "" : "s"}`
+          : body.checked > 0
+            ? "✓ Checked — nothing new to add"
+            : "✓ Up to date. Forward a bill to the address above, then check again.",
+      );
     } catch {
-      setTestStatus("error");
+      setCheckStatus("error");
     }
   }
 
@@ -309,19 +326,19 @@ export function ConnectEmailWizard({
 
             <div className="flex flex-wrap items-center gap-3">
               <button
-                onClick={sendTestBill}
-                disabled={testStatus === "sending"}
-                data-testid="send-test-bill-button"
+                onClick={checkForNewBills}
+                disabled={checkStatus === "checking"}
+                data-testid="check-new-bills-button"
                 className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-medium text-teal-700 hover:bg-teal-50 disabled:opacity-50"
               >
-                {testStatus === "sending" ? "Sending…" : "Send a fake test bill"}
+                {checkStatus === "checking" ? "Checking…" : "Check for new bills"}
               </button>
-              {testStatus === "sent" && (
-                <span className="text-xs text-teal-700" data-testid="test-bill-sent">
-                  ✓ Sent, check Bills
+              {checkResult && (
+                <span className="text-xs text-teal-700" data-testid="check-new-bills-result">
+                  {checkResult}
                 </span>
               )}
-              {testStatus === "error" && <span className="text-xs text-red-600">Failed, try again</span>}
+              {checkStatus === "error" && <span className="text-xs text-red-600">Check failed, try again</span>}
 
               <button
                 onClick={sendTestReminder}

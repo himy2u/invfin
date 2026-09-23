@@ -1,7 +1,9 @@
 import asyncio
+import base64
+import binascii
 import os
 import secrets
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from email.utils import getaddresses
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -12,6 +14,7 @@ from pydantic import BaseModel
 from db import get_service_client
 from email_bill_detect import (
     CLASSIFY_CONFIDENCE_THRESHOLD,
+    BillDocument,
     BillExtractionFailed,
     classify_bill_email,
     detect_gmail_confirmation_link,
@@ -31,6 +34,19 @@ _bearer = HTTPBearer()
 # legitimate upside for a bill email, which is plain text.
 _MAX_BODY_CHARS = 200_000
 
+# Only formats Gemini can actually read as a document, and only the ones a bill is ever actually
+# sent as. Everything else on a real forwarded email — .ics calendar invites, vCards, tracking
+# pixels, the sender's logo, a .zip — is either unreadable or noise, and each one we DID send would
+# be a wasted vision call. Checked against the media type only (Postmark sends ContentType with
+# parameters attached, e.g. 'application/pdf; name="factuur.pdf"').
+_BILL_ATTACHMENT_MIME_TYPES = frozenset({"application/pdf", "image/jpeg", "image/png"})
+
+# Cap on the DECODED attachment size, same reasoning as _MAX_BODY_CHARS above: an unbounded
+# attachment costs memory, a row in Postgres, and Gemini spend, with no legitimate upside — a bill
+# document is a page or two. Anything larger is not the bill; skip it rather than truncate it,
+# because half a PDF is not a readable PDF.
+_MAX_ATTACHMENT_BYTES = 5_000_000
+
 
 def _verify_webhook_auth(credentials: HTTPBasicCredentials = Depends(_security)) -> None:
     expected_user = os.environ.get("INBOUND_EMAIL_WEBHOOK_USER", "")
@@ -45,12 +61,64 @@ def _verify_webhook_auth(credentials: HTTPBasicCredentials = Depends(_security))
         raise HTTPException(401, "invalid webhook credentials")
 
 
+class InboundAttachment(BaseModel):
+    Name: str = ""
+    # Base64 as Postmark sends it. Kept in that form all the way to the queue row so nothing has to
+    # re-encode it; it's only decoded at the point it's handed to Gemini.
+    Content: str = ""
+    ContentType: str = ""
+
+
 class InboundEmailPayload(BaseModel):
     Subject: str = ""
     TextBody: str = ""
     MessageID: str
     OriginalRecipient: str = ""
     To: str = ""
+    Attachments: list[InboundAttachment] = []
+
+
+def _select_bill_attachment(payload: InboundEmailPayload) -> InboundAttachment | None:
+    # First readable PDF/image wins, not "all of them": a bill email carries one bill document, and
+    # trying every attachment would multiply vision-call cost against a sender's logo and their
+    # .ics invite for the sake of a case that doesn't happen.
+    for attachment in payload.Attachments:
+        media_type = attachment.ContentType.split(";", 1)[0].strip().lower()
+        if media_type not in _BILL_ATTACHMENT_MIME_TYPES:
+            continue
+        try:
+            decoded_size = len(base64.b64decode(attachment.Content, validate=True))
+        except (binascii.Error, ValueError):
+            # A malformed Content is the sender's problem, not a reason to 500 the webhook and make
+            # Postmark retry a payload that will never decode. Skip it and keep looking.
+            logger.warning(
+                "inbound attachment is not valid base64", message_id=payload.MessageID, name=attachment.Name[:120]
+            )
+            continue
+        if decoded_size > _MAX_ATTACHMENT_BYTES:
+            logger.info(
+                "inbound attachment skipped, over size cap",
+                message_id=payload.MessageID,
+                name=attachment.Name[:120],
+                bytes=decoded_size,
+            )
+            continue
+        return attachment
+    return None
+
+
+def _document_from_row(row: dict) -> BillDocument | None:
+    content = row.get("attachment_content")
+    mime_type = row.get("attachment_mime_type")
+    if not content or not mime_type:
+        return None
+    try:
+        return BillDocument(data=base64.b64decode(content, validate=True), mime_type=mime_type)
+    except (binascii.Error, ValueError):
+        # Already validated at enqueue time, so this only fires if the stored text was mangled in
+        # between. Processing the body alone is strictly better than failing the whole row.
+        logger.warning("stored attachment failed to decode", queue_id=row.get("id"))
+        return None
 
 
 # Required, not defaulted — a hardcoded fallback here would silently accept mail addressed to the
@@ -170,6 +238,8 @@ def _enqueue_inbound_email(payload: InboundEmailPayload) -> dict[str, str]:
     # Idempotency now happens at INSERT time, before any LLM spend — a Postmark retry of the same
     # MessageID hits the unique constraint immediately instead of (as before) only being caught
     # after a full classify+extract call had already run.
+    attachment = _select_bill_attachment(payload)
+
     inserted = (
         client.table("inbound_email_queue")
         .upsert(
@@ -179,6 +249,11 @@ def _enqueue_inbound_email(payload: InboundEmailPayload) -> dict[str, str]:
                 "subject": payload.Subject,
                 "body_text": body_text,
                 "message_id": payload.MessageID,
+                # Persisted here because the classify/extract work runs later, in a background task
+                # reading this row back — by then the webhook payload is long gone.
+                "attachment_name": attachment.Name[:500] if attachment else None,
+                "attachment_mime_type": attachment.ContentType.split(";", 1)[0].strip().lower() if attachment else None,
+                "attachment_content": attachment.Content if attachment else None,
             },
             on_conflict="message_id",
             ignore_duplicates=True,
@@ -195,7 +270,41 @@ def _enqueue_inbound_email(payload: InboundEmailPayload) -> dict[str, str]:
     return {"status": "queued", "queue_id": inserted.data[0]["id"]}
 
 
-def _process_claimed_row(client, row: dict) -> None:
+def _detect_bill(api_key: str, subject: str, body_text: str, document: BillDocument | None):
+    """Body text first, attachment only as a fallback. Returns None for "not a bill".
+
+    Ordering is a cost decision, not a correctness one. The body-only classify is the cheap call
+    and it already succeeds on most real bills, so an attachment is only ever sent to Gemini when
+    the body alone didn't settle it — either because the classifier wasn't convinced (the
+    "herewith you receive an invoice" case, where every number lives in the PDF) or because
+    extraction subsequently couldn't find the fields it needs."""
+    classification = classify_bill_email(api_key, subject, body_text)
+    confident = classification.is_bill and classification.confidence >= CLASSIFY_CONFIDENCE_THRESHOLD
+
+    if not confident:
+        if document is None:
+            return None
+        # Re-ask with the attachment in hand. The base classify prompt deliberately rejects
+        # "your invoice is attached" emails with no numbers in the text — which is the right call
+        # when the attachment is invisible to it, and the wrong one now that it isn't.
+        classification = classify_bill_email(api_key, subject, body_text, document)
+        if not classification.is_bill or classification.confidence < CLASSIFY_CONFIDENCE_THRESHOLD:
+            return None
+        return extract_bill_from_email(api_key, subject, body_text, document)
+
+    try:
+        return extract_bill_from_email(api_key, subject, body_text)
+    except BillExtractionFailed:
+        if document is None:
+            raise
+        # The classifier was confident from the body alone but extraction still couldn't produce a
+        # usable bill — typically a body that names the vendor and says "see attached" with the
+        # amount and due date only in the PDF. One retry with the document, then give up.
+        logger.info("body-text extraction failed, retrying with the attachment")
+        return extract_bill_from_email(api_key, subject, body_text, document)
+
+
+def _process_claimed_row(client, row: dict) -> str | None:
     # Shared by both the request-scoped background task (the common, near-instant path) and the
     # /process-email-queue sweep (crash recovery + eventual consistency net) — one place implements
     # the actual classify/extract/create/notify logic so the two callers can't drift apart.
@@ -205,14 +314,12 @@ def _process_claimed_row(client, row: dict) -> None:
     api_key = os.environ["GEMINI_API_KEY"]
 
     try:
-        classification = classify_bill_email(api_key, row["subject"], row["body_text"])
-        if not classification.is_bill or classification.confidence < CLASSIFY_CONFIDENCE_THRESHOLD:
+        extraction = _detect_bill(api_key, row["subject"], row["body_text"], _document_from_row(row))
+        if extraction is None:
             client.table("inbound_email_queue").update(
                 {"status": "done", "processed_at": datetime.now(timezone.utc).isoformat()}
             ).eq("id", row_id).execute()
-            return
-
-        extraction = extract_bill_from_email(api_key, row["subject"], row["body_text"])
+            return None
 
         result = client.rpc(
             "create_detected_bill",
@@ -249,6 +356,7 @@ def _process_claimed_row(client, row: dict) -> None:
             f"We found a bill from {extraction.vendor_name} due {extraction.due_date}. Review it in the app.",
             "bill_detected",
         )
+        return bill_id
     except (BillExtractionFailed, APIError) as exc:
         # BillExtractionFailed = Gemini's output didn't parse. APIError here is
         # create_detected_bill's own business-rule rejection (e.g. an empty line_items list).
@@ -285,6 +393,7 @@ def _process_claimed_row(client, row: dict) -> None:
         client.table("inbound_email_queue").update({"status": next_status, "last_error": str(exc)[:2000]}).eq(
             "id", row_id
         ).execute()
+    return None
 
 
 def _extract_claimed_row(rpc_data) -> dict | None:
@@ -340,69 +449,73 @@ async def inbound_email(
     return result
 
 
-@router.post("/send-test-bill")
-async def send_test_bill(
-    background_tasks: BackgroundTasks, credentials: HTTPAuthorizationCredentials = Depends(_bearer)
-) -> dict[str, str]:
-    # Lets a user prove detection works without composing and forwarding a real email — same
-    # webhook path a real Postmark delivery takes, just authenticated by the user's own Supabase
-    # session instead of the Postmark Basic Auth credentials. Deliberately does NOT reuse those
-    # webhook credentials here: this endpoint is reachable from the mobile app, which (unlike the
-    # Next.js API route the web app uses for the same feature) has no server-side layer of its own
-    # to keep a shared secret out of the client bundle.
-    client = get_service_client()
+def _user_id_from_session(client, credentials: HTTPAuthorizationCredentials) -> str:
+    # The two user-facing endpoints below are reachable from the mobile app, which (unlike the web
+    # app, which has Next.js API routes in front of it) has no server-side layer of its own to keep
+    # a shared secret out of the client bundle. So they authenticate with the user's own Supabase
+    # session, never the Postmark webhook credentials.
     try:
         user_response = client.auth.get_user(credentials.credentials)
     except Exception as exc:
         raise HTTPException(401, "invalid session") from exc
     if not user_response or not user_response.user:
         raise HTTPException(401, "invalid session")
-    user_id = user_response.user.id
+    return user_response.user.id
 
-    address_row = (
-        client.table("email_forwarding_addresses").select("forwarding_token, enabled").eq("user_id", user_id).execute()
-    )
-    if not address_row.data or not address_row.data[0]["enabled"]:
-        raise HTTPException(400, "email detection is not enabled yet")
-    token = address_row.data[0]["forwarding_token"]
 
-    due_date = (datetime.now(timezone.utc) + timedelta(days=14)).date().isoformat()
-    # A fresh MessageID per click, NOT a fixed per-user one. message_id is the idempotency key for
-    # the inbound queue (it exists so a Postmark redelivery of the same email can't double-create a
-    # bill), so a fixed "self-test-{user_id}" made the very first click consume that key forever:
-    # every later click hit the unique constraint, returned {"status": "duplicate"} with HTTP 200,
-    # and created nothing, while both UIs read the 200 as success and told the user "✓ Sent, check
-    # Bills". A user-initiated test send is not a webhook redelivery and must never be deduplicated
-    # against an earlier one.
-    payload = InboundEmailPayload(
-        MessageID=f"self-test-{user_id}-{secrets.token_hex(8)}",
-        Subject="Your Sample Utility bill is ready",
-        TextBody=(
-            "Dear Customer,\n\nYour bill from Sample Utility Co. is now available.\n\n"
-            f"Amount Due: $42.00\nDue Date: {due_date}\n\nSample Utility Co.\n1 Test Street"
-        ),
-        OriginalRecipient=f"{token}@{_FORWARDING_DOMAIN}",
-    )
-    result = await asyncio.to_thread(_enqueue_inbound_email, payload)
-    if result.get("status") == "queued":
-        background_tasks.add_task(_process_queue_row_sync, result["queue_id"])
+_USER_CHECK_BATCH_SIZE = 20
+
+
+def _check_new_bills_sync(user_id: str) -> dict[str, int]:
+    # What the "Check for new bills" button actually does: process this user's own inbound emails
+    # that the automatic path hasn't finished yet (a background task that never ran or died
+    # mid-flight, a row that failed transiently and went back to pending). It creates nothing on
+    # its own and invents nothing — every bill it reports came out of a real forwarded email
+    # already sitting in the queue. When there's nothing outstanding it honestly reports zero
+    # rather than manufacturing something to show.
+    client = get_service_client()
+    claimed = client.rpc(
+        "claim_inbound_email_queue_batch_for_user", {"p_user_id": user_id, "p_limit": _USER_CHECK_BATCH_SIZE}
+    ).execute()
+    rows = claimed.data or []
+
+    detected = 0
+    for row in rows:
+        try:
+            if _process_claimed_row(client, row) is not None:
+                detected += 1
+        except Exception as exc:
+            # _process_claimed_row handles its own known failure modes and updates the row itself;
+            # this only stops one unexpected error from aborting the rest of the user's batch.
+            logger.error("check-new-bills failed to process a row", queue_id=row.get("id"), error=str(exc))
+
+    return {"checked": len(rows), "bills_detected": detected}
+
+
+@router.post("/check-new-bills")
+async def check_new_bills(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict[str, int]:
+    client = get_service_client()
+    user_id = _user_id_from_session(client, credentials)
+    logger.info("manual bill check requested", user_id=user_id)
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(_check_new_bills_sync, user_id), timeout=60)
+    except asyncio.TimeoutError as exc:
+        logger.error("manual bill check timed out", user_id=user_id)
+        raise HTTPException(504, "check timed out") from exc
+    except Exception as exc:
+        logger.error("manual bill check failed", user_id=user_id, error=str(exc))
+        raise HTTPException(502, "check failed — see agent logs") from exc
     return result
 
 
 @router.post("/send-test-reminder")
 async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict[str, str]:
-    # Same reasoning as /send-test-bill: lets a user verify reminder delivery (email/push/in-app)
-    # actually works right now, without waiting for a bill's real due date. Deliberately does NOT
+    # Lets a user verify reminder delivery (email/push/in-app) actually works right now, without
+    # waiting for a bill's real due date. Deliberately does NOT
     # touch reminder_sent_at or go through claim_bill_reminder — those belong only to the real
     # once-per-bill reminder cron, and a test send must never suppress that later real reminder.
     client = get_service_client()
-    try:
-        user_response = client.auth.get_user(credentials.credentials)
-    except Exception as exc:
-        raise HTTPException(401, "invalid session") from exc
-    if not user_response or not user_response.user:
-        raise HTTPException(401, "invalid session")
-    user_id = user_response.user.id
+    user_id = _user_id_from_session(client, credentials)
 
     bill_row = (
         client.table("bills")

@@ -1,8 +1,11 @@
 import json
 import re
 
+from dataclasses import dataclass
+
 from google import genai
 from google.genai import errors as genai_errors
+from google.genai import types
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -26,6 +29,25 @@ generic "your invoice is attached" email with no amount/due date actually visibl
 
 Respond with JSON only, no markdown fences: {"is_bill": boolean, "confidence": number between 0 and 1}
 """
+
+# Appended to the prompts above ONLY when an attachment is being sent alongside them, so the
+# text-only path's prompt text stays byte-identical to what's already proven in production.
+#
+# The classifier's base prompt explicitly rejects "a generic 'your invoice is attached' email with
+# no amount/due date actually visible in the text" — correct when the attachment is invisible to it,
+# and exactly wrong once the attachment is right there in the same request. This override says so
+# rather than weakening the base rule, which still has to hold for the text-only call.
+_CLASSIFY_ATTACHMENT_NOTE = """
+
+An attachment from this email is included above. Judge the email and its attachment TOGETHER: an
+email whose body only says "your invoice is attached" IS a bill when the attached document itself
+shows a concrete amount payable. Judge by what the attachment shows, not by the body's silence."""
+
+_EXTRACT_ATTACHMENT_NOTE = """
+
+An attachment from this email is included above and is the authoritative source: read vendor,
+amount, currency, issue date and due date from the attached document, and use the email's subject
+and body only to fill in what the document doesn't state."""
 
 _EXTRACT_PROMPT = """This email is a bill the recipient needs to pay. Extract data as JSON matching
 this exact shape, no other text, no markdown fences:
@@ -57,6 +79,18 @@ CLASSIFY_CONFIDENCE_THRESHOLD = 0.7
 # pinning one. The path always starts with /mail/vf- (the cancel link alongside it uses /mail/uf-,
 # which must NOT match here or the wizard would hand the user a link that undoes the request).
 _GMAIL_CONFIRMATION_LINK_RE = re.compile(r"https://mail[a-z.-]*\.google\.com/mail/vf-\S+")
+
+
+@dataclass(frozen=True)
+class BillDocument:
+    """One PDF/image attachment off an inbound email, ready to hand to Gemini inline.
+
+    Deliberately not a pydantic model: it holds raw bytes that must never be serialized into a log
+    line or an API response, and keeping it a plain frozen dataclass makes that harder to do by
+    accident."""
+
+    data: bytes
+    mime_type: str
 
 
 class ClassifyResult(BaseModel):
@@ -104,27 +138,48 @@ def _strip_markdown_fence(text: str) -> str:
     wait=wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
 )
-def _generate_with_retry(client: genai.Client, prompt: str, text: str):
-    return client.models.generate_content(model="gemini-3.5-flash-lite", contents=[text, prompt])
+def _generate_with_retry(client: genai.Client, contents: list):
+    return client.models.generate_content(model="gemini-3.5-flash-lite", contents=contents)
 
 
-def classify_bill_email(api_key: str, subject: str, body_text: str) -> ClassifyResult:
-    client = genai.Client(api_key=api_key)
+def _build_contents(subject: str, body_text: str, prompt: str, note: str, document: BillDocument | None) -> list:
+    # The attachment goes FIRST, ahead of the email text, matching how invoice_scan.py orders a
+    # document-plus-prompt request (the document these models read best is the one they see before
+    # the instructions about it).
     text = f"Subject: {subject}\n\n{body_text}"
-    response = _generate_with_retry(client, _CLASSIFY_PROMPT, text)
+    if document is None:
+        return [text, prompt]
+    return [types.Part.from_bytes(data=document.data, mime_type=document.mime_type), text, prompt + note]
+
+
+def classify_bill_email(
+    api_key: str, subject: str, body_text: str, document: BillDocument | None = None
+) -> ClassifyResult:
+    client = genai.Client(api_key=api_key)
+    response = _generate_with_retry(
+        client, _build_contents(subject, body_text, _CLASSIFY_PROMPT, _CLASSIFY_ATTACHMENT_NOTE, document)
+    )
     try:
         data = json.loads(_strip_markdown_fence(response.text or "{}"))
         result = ClassifyResult(**data)
     except (json.JSONDecodeError, ValidationError) as exc:
         raise BillExtractionFailed(f"classification output did not parse: {exc}") from exc
-    logger.info("bill email classified", is_bill=result.is_bill, confidence=result.confidence)
+    logger.info(
+        "bill email classified",
+        is_bill=result.is_bill,
+        confidence=result.confidence,
+        with_attachment=document is not None,
+    )
     return result
 
 
-def extract_bill_from_email(api_key: str, subject: str, body_text: str) -> BillExtractionResult:
+def extract_bill_from_email(
+    api_key: str, subject: str, body_text: str, document: BillDocument | None = None
+) -> BillExtractionResult:
     client = genai.Client(api_key=api_key)
-    text = f"Subject: {subject}\n\n{body_text}"
-    response = _generate_with_retry(client, _EXTRACT_PROMPT, text)
+    response = _generate_with_retry(
+        client, _build_contents(subject, body_text, _EXTRACT_PROMPT, _EXTRACT_ATTACHMENT_NOTE, document)
+    )
     try:
         data = json.loads(_strip_markdown_fence(response.text or "{}"))
         return BillExtractionResult(**data)
