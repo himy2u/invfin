@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { REMINDER_UNITS, type ReminderDraft, defaultExactLocalValue, reminderUpdatePayload } from "@/lib/reminder-draft";
 
 type PendingBill = {
   id: string;
@@ -10,7 +11,10 @@ type PendingBill = {
   total_cents: number;
   currency: string;
   due_date: string | null;
-  reminder_days_before: number;
+  reminder_mode: string;
+  reminder_offset_value: number;
+  reminder_offset_unit: string;
+  reminder_at: string | null;
 };
 
 /**
@@ -48,21 +52,43 @@ export function PendingReviewSection({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"approve" | "dismiss" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [reminderDays, setReminderDays] = useState<Record<string, number>>(
-    Object.fromEntries(bills.map((b) => [b.id, b.reminder_days_before])),
+  const [drafts, setDrafts] = useState<Record<string, ReminderDraft>>(
+    Object.fromEntries(
+      bills.map((b) => [
+        b.id,
+        {
+          mode: b.reminder_mode === "exact" ? "exact" : "offset",
+          value: String(b.reminder_offset_value),
+          unit: b.reminder_offset_unit,
+          // The datetime-local input needs a local-time string, never an ISO/UTC one — feeding it
+          // a Z-suffixed value makes it render blank with no error.
+          exactLocal: defaultExactLocalValue(b.reminder_at, b.due_date),
+        } satisfies ReminderDraft,
+      ]),
+    ),
   );
 
   if (bills.length === 0) return <>{emptyState}</>;
+
+  function updateDraft(billId: string, patch: Partial<ReminderDraft>) {
+    setDrafts((prev) => ({ ...prev, [billId]: { ...prev[billId], ...patch } }));
+  }
 
   async function approve(billId: string) {
     setBusyId(billId);
     setBusyAction("approve");
     setError(null);
-    // Accepting a detected bill and confirming when to be reminded about it happen in one step .
-    // save whatever reminder-days value is currently in the field before flipping it to unpaid,
-    // so the user isn't confirming a value they never actually saw applied.
-    const days = reminderDays[billId];
-    const { error: updateError } = await supabase.from("bills").update({ reminder_days_before: days }).eq("id", billId);
+    // Accepting a detected bill and confirming when to be reminded about it happen in one step:
+    // save whatever reminder timing is currently in the row before flipping it to unpaid, so the
+    // user isn't confirming a value they never actually saw applied.
+    const payload = reminderUpdatePayload(drafts[billId]);
+    if (!payload) {
+      setBusyId(null);
+      setBusyAction(null);
+      setError("Pick a date and time for the reminder, or switch back to “Before due date”.");
+      return;
+    }
+    const { error: updateError } = await supabase.from("bills").update(payload).eq("id", billId);
     if (updateError) {
       setBusyId(null);
       setBusyAction(null);
@@ -97,23 +123,77 @@ export function PendingReviewSection({
 
   const isTable = variant === "table";
 
-  // Built once per row and placed by whichever variant is rendering, so the editable field and the
+  // Built once per row and placed by whichever variant is rendering, so the editable fields and the
   // two one-way actions exist in exactly one place regardless of layout.
+  //
+  // Stays inline in the row rather than opening a modal, matching this table's "everything editable
+  // is inline" rule: the whole point of the review queue is tick-and-approve without a detour.
   function reminderInput(b: PendingBill) {
+    const draft = drafts[b.id];
+    const isExact = draft.mode === "exact";
     return (
-      <label className="flex items-center gap-1.5 text-xs text-zinc-600">
-        Remind me
-        <input
-          type="number"
-          min={0}
-          max={30}
-          value={reminderDays[b.id]}
-          data-testid="pending-review-reminder-days"
-          onChange={(e) => setReminderDays((prev) => ({ ...prev, [b.id]: Number(e.target.value) }))}
-          className="w-14 rounded border border-zinc-300 px-1.5 py-1 text-xs"
-        />
-        days before
-      </label>
+      <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-600" data-testid="pending-review-reminder">
+        <span>Remind me</span>
+        {/* Two buttons rather than a <select>: the choice changes which fields appear next to it,
+            and a segmented control makes that cause-and-effect visible at a glance. */}
+        <div className="inline-flex overflow-hidden rounded border border-zinc-300">
+          {(
+            [
+              ["offset", "Before due date"],
+              ["exact", "Specific date"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              data-testid={`reminder-mode-${mode}`}
+              aria-pressed={draft.mode === mode}
+              onClick={() => updateDraft(b.id, { mode })}
+              className={
+                draft.mode === mode
+                  ? "bg-teal-700 px-2 py-1 text-[11px] font-medium text-white"
+                  : "bg-white px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-50"
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {isExact ? (
+          <input
+            type="datetime-local"
+            value={draft.exactLocal}
+            data-testid="pending-review-reminder-at"
+            onChange={(e) => updateDraft(b.id, { exactLocal: e.target.value })}
+            className="rounded border border-zinc-300 px-1.5 py-1 text-xs"
+          />
+        ) : (
+          <>
+            <input
+              type="number"
+              min={0}
+              value={draft.value}
+              data-testid="pending-review-reminder-value"
+              onChange={(e) => updateDraft(b.id, { value: e.target.value })}
+              className="w-14 rounded border border-zinc-300 px-1.5 py-1 text-xs"
+            />
+            <select
+              value={draft.unit}
+              data-testid="pending-review-reminder-unit"
+              onChange={(e) => updateDraft(b.id, { unit: e.target.value })}
+              className="rounded border border-zinc-300 px-1.5 py-1 text-xs"
+            >
+              {REMINDER_UNITS.map((u) => (
+                <option key={u.value} value={u.value}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+            <span>before</span>
+          </>
+        )}
+      </div>
     );
   }
 
@@ -140,6 +220,17 @@ export function PendingReviewSection({
     );
   }
 
+  // Due date renders at the same weight as the vendor name, not as muted metadata: it is the field
+  // the whole reminder decision hangs on, so it sits immediately after the vendor in the table and
+  // immediately under it in the stacked card.
+  function dueDate(b: PendingBill) {
+    return b.due_date ? (
+      <span className="font-semibold text-zinc-900">{b.due_date}</span>
+    ) : (
+      <span className="text-zinc-400">No due date</span>
+    );
+  }
+
   return (
     <div
       className={isTable ? "mb-4" : "mb-6 rounded-lg border border-sky-200 bg-sky-50 p-4"}
@@ -157,8 +248,8 @@ export function PendingReviewSection({
         // a narrow screen, which a table can't do. Hidden under sm for the same reason.
         <div className="hidden grid-cols-[2fr_1fr_1fr_auto] items-center gap-3 border-b border-zinc-200 px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid">
           <span>Vendor</span>
-          <span>Amount</span>
           <span>Due</span>
+          <span>Amount</span>
           <span className="text-right">Remind me &amp; approve</span>
         </div>
       )}
@@ -172,10 +263,12 @@ export function PendingReviewSection({
               className="flex flex-col gap-2 px-3 py-3 sm:grid sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-center sm:gap-3"
             >
               <p className="text-sm font-medium text-zinc-900">{b.vendor_name}</p>
+              <p className="text-sm" data-testid="pending-review-due-date">
+                {dueDate(b)}
+              </p>
               <p className="text-sm text-zinc-700">
                 {(b.total_cents / 100).toFixed(2)} {b.currency}
               </p>
-              <p className="text-sm text-zinc-500">{b.due_date ?? "No due date"}</p>
               <div className="flex flex-wrap items-center justify-end gap-3">
                 {reminderInput(b)}
                 {actions(b)}
@@ -189,8 +282,11 @@ export function PendingReviewSection({
             >
               <div>
                 <p className="text-sm font-medium">{b.vendor_name}</p>
+                <p className="text-sm" data-testid="pending-review-due-date">
+                  {dueDate(b)}
+                </p>
                 <p className="text-xs text-zinc-500">
-                  {(b.total_cents / 100).toFixed(2)} {b.currency} · due {b.due_date}
+                  {(b.total_cents / 100).toFixed(2)} {b.currency}
                 </p>
               </div>
               <div className="flex items-center gap-3">

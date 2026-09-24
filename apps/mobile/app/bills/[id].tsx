@@ -91,10 +91,15 @@ export default function BillDetailScreen() {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>{bill.vendor_name}</Text>
+          {/* Due date is the second line, directly under the vendor, at the vendor's own size and
+              weight — not folded into the muted metadata line below, where it used to read as an
+              afterthought. Mirrors apps/web/app/bills/[id]/page.tsx. */}
+          <Text style={bill.due_date ? styles.dueDate : styles.dueDateMissing} testID="bill-due-date">
+            {bill.due_date ? `Due ${bill.due_date}` : "No due date"}
+          </Text>
           <Text style={styles.subtitle}>
             {bill.bill_number}
             {bill.po_number ? ` · PO ${bill.po_number}` : ""} · {bill.currency}
-            {bill.due_date ? ` · due ${bill.due_date}` : ""}
           </Text>
           {bill.vendor_address && <Text style={styles.addressText}>{bill.vendor_address}</Text>}
           {(bill.vendor_email || bill.vendor_phone) && (
@@ -151,6 +156,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 24 },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
   title: { fontSize: 20, fontWeight: "600" },
+  // Same size and weight as `title` on purpose — the due date carries equal billing with the name.
+  dueDate: { fontSize: 20, fontWeight: "700", color: "#18181b", marginTop: 2 },
+  dueDateMissing: { fontSize: 20, fontWeight: "600", color: "#a1a1aa", marginTop: 2 },
   subtitle: { fontSize: 13, color: "#71717a", marginTop: 2 },
   addressText: { fontSize: 12, color: "#71717a", marginTop: 4 },
   statusBadge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, fontSize: 13, fontWeight: "600" },

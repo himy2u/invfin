@@ -1,0 +1,55 @@
+name: Bill reminder sweep
+
+# Fires the agent service's /run-reminder-check every 5 minutes. Until this existed, nothing called
+# that endpoint on any schedule at all — reminders only ever ran if someone curl'd it by hand, which
+# means in practice they never ran. The whole fine-grained-timing feature is theoretical without it.
+#
+# Why GitHub Actions and not a Render Cron Job:
+#   Render's cron jobs are a separate paid resource — "a minimum monthly charge of $1 per cron job
+#   service" (render.com/docs/cronjobs), with no free tier. This repository is public, and GitHub
+#   Actions minutes are unmetered for public repositories, so this costs nothing. 5 minutes is also
+#   exactly GitHub's floor ("the shortest interval you can run scheduled workflows is once every
+#   5 minutes"), which happens to be the cadence this sweep wants.
+#
+# Two real limitations of this choice, accepted deliberately rather than papered over:
+#   1. Scheduled runs are best-effort. GitHub delays them under load, most often on the hour, and
+#      can drop queued runs entirely. The backend tolerates this: reminder_scheduling.REMINDER_GRACE
+#      lets a sweep that arrives late still deliver, so a skipped run is absorbed by the next one
+#      rather than losing the reminder.
+#   2. In a public repository, GitHub disables scheduled workflows after 60 days with no repository
+#      activity. Any commit re-arms it, but a genuinely dormant repo stops sending reminders
+#      silently. If this project ever goes quiet for two months while real users depend on
+#      reminders, move this to a paid always-on scheduler.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  # So the sweep can be run on demand from the Actions tab without waiting for the next slot —
+  # this is how the scheduler was first proven to work end to end.
+  workflow_dispatch:
+
+# A slow or hung run must never let the next scheduled run pile up behind it. Reminder claims are
+# atomic in Postgres (claim_bill_reminder), so a dropped overlapping run costs nothing.
+concurrency:
+  group: reminder-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: POST /run-reminder-check
+        env:
+          AGENT_SERVICE_URL: ${{ secrets.AGENT_SERVICE_URL }}
+          WEBHOOK_USER: ${{ secrets.INBOUND_EMAIL_WEBHOOK_USER }}
+          WEBHOOK_PASSWORD: ${{ secrets.INBOUND_EMAIL_WEBHOOK_PASSWORD }}
+        run: |
+          # No `set -x`: the Basic Auth credentials are on the curl command line and tracing would
+          # print them into a world-readable log on a public repository.
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --retry 2 --retry-delay 10 --max-time 90 \
+            -X POST "${AGENT_SERVICE_URL%/}/run-reminder-check" \
+            -u "${WEBHOOK_USER}:${WEBHOOK_PASSWORD}"
+          echo

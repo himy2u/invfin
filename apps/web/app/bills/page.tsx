@@ -11,7 +11,7 @@ export default async function BillsPage() {
   const supabase = await createClient();
   const { data: bills } = await supabase
     .from("bills")
-    .select("id, bill_number, status, total_cents, currency, vendor_name, due_date, reminder_days_before")
+    .select("id, bill_number, status, total_cents, currency, vendor_name, due_date, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
     .order("created_at", { ascending: false });
 
   // pending_review/dismissed are deliberately excluded here by filtering on the literal "unpaid"

@@ -50,6 +50,11 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
       <div className="mb-6 flex items-start justify-between gap-4">
         <div className="flex-1">
           <h1 className="text-xl font-semibold">{invoice.title || "Invoice"}</h1>
+          {/* Same rule as the bill detail screen: due date is the second line, at the title's own
+              size and weight. On this screen it previously did not appear in the header at all. */}
+          <p className={invoice.due_date ? "text-xl font-semibold text-zinc-900" : "text-xl font-semibold text-zinc-400"} data-testid="invoice-due-date">
+            {invoice.due_date ? `Due ${invoice.due_date}` : "No due date"}
+          </p>
           <p className="text-sm text-zinc-500">
             {invoice.invoice_number}
             {invoice.po_number && (

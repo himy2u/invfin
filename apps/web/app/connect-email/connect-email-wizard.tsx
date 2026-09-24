@@ -93,7 +93,7 @@ export function ConnectEmailWizard({
   const [confirmClicked, setConfirmClicked] = useState(false);
   const [hasDetectedBill, setHasDetectedBill] = useState(false);
   const [pendingBills, setPendingBills] = useState<
-    { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; reminder_days_before: number }[]
+    { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; reminder_mode: string; reminder_offset_value: number; reminder_offset_unit: string; reminder_at: string | null }[]
   >([]);
   const [starting, setStarting] = useState(false);
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
@@ -229,7 +229,7 @@ export function ConnectEmailWizard({
       // whether setup collapses, and an already-approved bill still answers that yes.
       const { data: bills } = await supabase
         .from("bills")
-        .select("id, vendor_name, total_cents, currency, due_date, status, reminder_days_before")
+        .select("id, vendor_name, total_cents, currency, due_date, status, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
         .eq("source", "email")
         .order("created_at", { ascending: false })
         .limit(50);

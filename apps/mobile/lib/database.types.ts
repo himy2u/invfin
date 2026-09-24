@@ -97,7 +97,10 @@ export type Database = {
           notes: string | null
           paid_at: string | null
           po_number: string | null
-          reminder_days_before: number
+          reminder_at: string | null
+          reminder_mode: string
+          reminder_offset_unit: string
+          reminder_offset_value: number
           reminder_sent_at: string | null
           source: string
           status: Database["public"]["Enums"]["bill_status"]
@@ -124,7 +127,10 @@ export type Database = {
           notes?: string | null
           paid_at?: string | null
           po_number?: string | null
-          reminder_days_before?: number
+          reminder_at?: string | null
+          reminder_mode?: string
+          reminder_offset_unit?: string
+          reminder_offset_value?: number
           reminder_sent_at?: string | null
           source?: string
           status?: Database["public"]["Enums"]["bill_status"]
@@ -151,7 +157,10 @@ export type Database = {
           notes?: string | null
           paid_at?: string | null
           po_number?: string | null
-          reminder_days_before?: number
+          reminder_at?: string | null
+          reminder_mode?: string
+          reminder_offset_unit?: string
+          reminder_offset_value?: number
           reminder_sent_at?: string | null
           source?: string
           status?: Database["public"]["Enums"]["bill_status"]

@@ -23,7 +23,7 @@ from email_bill_detect import (
 from logging_setup import logger
 from mailer import postmark_rejection_reason, send_bill_reminder_email
 from push import send_push_notification
-from reminder_scheduling import reminder_due_today
+from reminder_scheduling import compute_remind_at, reminder_due
 
 router = APIRouter()
 _security = HTTPBasic()
@@ -674,9 +674,18 @@ async def process_email_queue(_auth: None = Depends(_verify_webhook_auth)) -> di
     return result
 
 
+def _parse_reminder_at(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    # PostgREST renders timestamptz as e.g. '2026-09-24T18:05:00+00:00', but has historically also
+    # emitted a trailing 'Z' and fractional seconds of varying width; fromisoformat handles the
+    # latter on 3.11+ and the former only after this swap.
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
 def _run_reminder_check() -> dict[str, int]:
     client = get_service_client()
-    today = date.today()
+    now = datetime.now(timezone.utc)
 
     # This selects every unpaid bill, not just email-detected ones — a manually-created bill can
     # have a null due_date (it's nullable on the base bills table; nothing requires it at manual
@@ -685,7 +694,7 @@ def _run_reminder_check() -> dict[str, int]:
     # silently withholding every OTHER user's reminder for the day.
     bills = (
         client.table("bills")
-        .select("id, user_id, vendor_name, due_date, reminder_days_before")
+        .select("id, user_id, vendor_name, due_date, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
         .eq("status", "unpaid")
         .is_("reminder_sent_at", "null")
         .execute()
@@ -695,10 +704,14 @@ def _run_reminder_check() -> dict[str, int]:
     skipped = 0
     for bill in bills.data or []:
         try:
-            if not bill["due_date"]:
-                continue
-            due = date.fromisoformat(bill["due_date"])
-            if not reminder_due_today(due, bill["reminder_days_before"], today):
+            remind_at = compute_remind_at(
+                mode=bill["reminder_mode"],
+                due_date=date.fromisoformat(bill["due_date"]) if bill["due_date"] else None,
+                offset_value=bill["reminder_offset_value"],
+                offset_unit=bill["reminder_offset_unit"],
+                reminder_at=_parse_reminder_at(bill["reminder_at"]),
+            )
+            if not reminder_due(remind_at, now):
                 continue
 
             claimed = client.rpc("claim_bill_reminder", {"p_bill_id": bill["id"]}).execute()
@@ -712,7 +725,11 @@ def _run_reminder_check() -> dict[str, int]:
                 bill["user_id"],
                 bill["id"],
                 "Bill due soon",
-                f"{bill['vendor_name']} is due {bill['due_date']}.",
+                # An exact-mode reminder can be set on a bill with no due date at all, so the body
+                # has to work without one rather than print "is due None".
+                f"{bill['vendor_name']} is due {bill['due_date']}."
+                if bill["due_date"]
+                else f"You asked to be reminded about {bill['vendor_name']}.",
                 "bill_reminder",
             )
             sent += 1

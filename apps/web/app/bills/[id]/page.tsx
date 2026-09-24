@@ -31,12 +31,18 @@ export default async function BillDetailPage({ params }: { params: Promise<{ id:
       <div className="mb-6 flex items-start justify-between gap-4">
         <div className="flex-1">
           <h1 className="text-xl font-semibold">{bill.vendor_name}</h1>
+          {/* Due date is the second line, directly under the vendor, at the vendor's own size and
+              weight — deliberately NOT folded into the muted metadata line below it, where it used
+              to sit as " · due 2026-10-24" and read as an afterthought. It is the single fact that
+              decides whether this screen needs acting on today. */}
+          <p className={bill.due_date ? "text-xl font-semibold text-zinc-900" : "text-xl font-semibold text-zinc-400"} data-testid="bill-due-date">
+            {bill.due_date ? `Due ${bill.due_date}` : "No due date"}
+          </p>
           <p className="text-sm text-zinc-500">
             {bill.bill_number}
             {bill.po_number && <span> · PO {bill.po_number}</span>}
             {" · "}
             {bill.currency}
-            {bill.due_date && <span> · due {bill.due_date}</span>}
           </p>
           {bill.vendor_address && <p className="mt-2 text-sm text-zinc-500 whitespace-pre-line">{bill.vendor_address}</p>}
           {(bill.vendor_email || bill.vendor_phone) && (

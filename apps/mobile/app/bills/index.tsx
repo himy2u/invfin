@@ -12,7 +12,10 @@ type BillRow = {
   currency: string;
   vendor_name: string;
   due_date: string | null;
-  reminder_days_before: number;
+  reminder_mode: string;
+  reminder_offset_value: number;
+  reminder_offset_unit: string;
+  reminder_at: string | null;
 };
 
 const STATUS_STYLES: Record<string, { bg: string; fg: string }> = {
@@ -30,7 +33,7 @@ export default function BillsScreen() {
     setLoading(true);
     supabase
       .from("bills")
-      .select("id, bill_number, status, total_cents, currency, vendor_name, due_date, reminder_days_before")
+      .select("id, bill_number, status, total_cents, currency, vendor_name, due_date, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
       .order("created_at", { ascending: false })
       .then(({ data }) => {
         if (!cancelled) {

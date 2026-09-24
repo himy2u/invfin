@@ -15,6 +15,7 @@ type InvoiceDetail = {
   total_cents: number;
   amount_paid_cents: number;
   sent_at: string | null;
+  due_date: string | null;
   terms: string | null;
   title: string | null;
   summary: string | null;
@@ -82,7 +83,7 @@ export default function InvoiceDetailScreen() {
     supabase
       .from("invoices")
       .select(
-        "id, invoice_number, status, currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents, sent_at, terms, title, summary, po_number, user_id, clients(id, name, email, phone, billing_address)",
+        "id, invoice_number, status, currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents, sent_at, due_date, terms, title, summary, po_number, user_id, clients(id, name, email, phone, billing_address)",
       )
       .eq("id", id)
       .single()
@@ -176,6 +177,11 @@ export default function InvoiceDetailScreen() {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>{invoice.title || "Invoice"}</Text>
+          {/* Second line, at the title's own size and weight — same rule as the bill detail screen.
+              This header previously did not show the due date at all. */}
+          <Text style={invoice.due_date ? styles.dueDate : styles.dueDateMissing} testID="invoice-due-date">
+            {invoice.due_date ? `Due ${invoice.due_date}` : "No due date"}
+          </Text>
           <Text style={styles.subtitle}>
             {invoice.invoice_number}
             {invoice.po_number ? <Text testID="invoice-po-number"> · PO {invoice.po_number}</Text> : null}
@@ -323,6 +329,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 24 },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
   title: { fontSize: 20, fontWeight: "600" },
+  // Same size and weight as `title` on purpose — the due date carries equal billing with the name.
+  dueDate: { fontSize: 20, fontWeight: "700", color: "#18181b", marginTop: 2 },
+  dueDateMissing: { fontSize: 20, fontWeight: "600", color: "#a1a1aa", marginTop: 2 },
   subtitle: { fontSize: 13, color: "#71717a", marginTop: 2 },
   summaryText: { fontSize: 13, color: "#3f3f46", marginBottom: 12 },
   statusBadge: { backgroundColor: "#ccfbf1", color: "#115e59", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, fontSize: 13, fontWeight: "600" },

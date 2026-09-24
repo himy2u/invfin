@@ -145,7 +145,7 @@ export default function ConnectEmailScreen() {
       // whether setup collapses, and an already-approved bill still answers that yes.
       const { data: bills } = await supabase
         .from("bills")
-        .select("id, vendor_name, total_cents, currency, due_date, status, reminder_days_before")
+        .select("id, vendor_name, total_cents, currency, due_date, status, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
         .eq("source", "email")
         .order("created_at", { ascending: false })
         .limit(50);

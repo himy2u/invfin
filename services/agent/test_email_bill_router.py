@@ -1,5 +1,6 @@
 import base64
 import os
+from datetime import datetime, timedelta, timezone
 
 # Force-set (not setdefault) — these tests assert against a specific username/password pair, so
 # they must be hermetic against whatever real value happens to already be loaded into the ambient
@@ -171,7 +172,20 @@ class FakeClient:
             return FakeRpcCall(self._claim_queue_row(params["p_id"]))
         if name == "claim_inbound_email_queue_batch_for_user":
             return FakeRpcCall(self._claim_queue_batch_for_user(params["p_user_id"]))
+        if name == "claim_bill_reminder":
+            return FakeRpcCall(self._claim_bill_reminder(params["p_bill_id"]))
         return FakeRpcCall(FakeResult(self.rpc_results.get(name)))
+
+    def _claim_bill_reminder(self, bill_id):
+        # Mirrors the real RPC's atomic claim: the first caller flips reminder_sent_at and gets
+        # True, every later caller sees it already set and gets False. This is what makes a bill's
+        # reminder fire exactly once even though the sweep now runs every 5 minutes instead of
+        # once a day.
+        for r in self.store.get("bills", {"rows": []}).get("rows", []):
+            if r.get("id") == bill_id and r.get("reminder_sent_at") is None and r.get("status") == "unpaid":
+                r["reminder_sent_at"] = "2026-09-24T00:00:00+00:00"
+                return FakeResult(True)
+        return FakeResult(False)
 
     def _claim_queue_batch_for_user(self, user_id):
         # Mirrors the real RPC's two load-bearing properties: it claims only rows belonging to the
@@ -813,3 +827,100 @@ def test_check_new_bills_processes_only_the_callers_own_queued_email(monkeypatch
     # The other tenant's row was never claimed, so its attempt count is untouched.
     assert rows["q2"]["status"] == "pending"
     assert rows["q2"]["attempts"] == 0
+
+
+# --- /run-reminder-check ------------------------------------------------------------------------
+# Timing arithmetic itself lives in test_reminder_scheduling.py; these cover the sweep's wiring:
+# which rows it looks at, that it claims before notifying, and that it never fires twice.
+
+
+def _bill_row(**overrides):
+    row = {
+        "id": "b1",
+        "user_id": "u1",
+        "vendor_name": "British Gas",
+        "status": "unpaid",
+        "due_date": None,
+        "reminder_mode": "offset",
+        "reminder_offset_value": 2,
+        "reminder_offset_unit": "days",
+        "reminder_at": None,
+        "reminder_sent_at": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _past_instant() -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+
+def _future_instant() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+
+def test_run_reminder_check_rejects_missing_auth():
+    client, _ = _build_app({}, {})
+    assert client.post("/run-reminder-check").status_code == 401
+
+
+def test_run_reminder_check_fires_an_exact_reminder_whose_instant_has_passed():
+    store = {"bills": {"rows": [_bill_row(reminder_mode="exact", reminder_at=_past_instant())], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    response = client.post("/run-reminder-check", auth=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"checked": 1, "reminders_sent": 1, "skipped": 0}
+    assert store["bills"]["rows"][0]["reminder_sent_at"] is not None
+    assert len(store["notifications"]["inserts"]) == 1
+
+
+def test_run_reminder_check_leaves_a_future_exact_reminder_alone():
+    store = {"bills": {"rows": [_bill_row(reminder_mode="exact", reminder_at=_future_instant())], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    assert client.post("/run-reminder-check", auth=AUTH).json() == {"checked": 1, "reminders_sent": 0, "skipped": 0}
+    assert store["bills"]["rows"][0]["reminder_sent_at"] is None
+    assert "notifications" not in store
+
+
+def test_run_reminder_check_never_fires_the_same_bill_twice():
+    # The sweep runs every 5 minutes now, so this is the difference between one reminder and 288 of
+    # them a day. Two back-to-back invocations stand in for two consecutive sweeps.
+    store = {"bills": {"rows": [_bill_row(reminder_mode="exact", reminder_at=_past_instant())], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    assert client.post("/run-reminder-check", auth=AUTH).json()["reminders_sent"] == 1
+    second = client.post("/run-reminder-check", auth=AUTH).json()
+    # Already-claimed rows are excluded by the query's `reminder_sent_at is null` filter, so the
+    # second sweep does not even consider it.
+    assert second == {"checked": 0, "reminders_sent": 0, "skipped": 0}
+    assert len(store["notifications"]["inserts"]) == 1
+
+
+def test_run_reminder_check_skips_an_offset_bill_with_no_due_date():
+    store = {"bills": {"rows": [_bill_row(due_date=None)], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    assert client.post("/run-reminder-check", auth=AUTH).json() == {"checked": 1, "reminders_sent": 0, "skipped": 0}
+    assert store["bills"]["rows"][0]["reminder_sent_at"] is None
+
+
+def test_run_reminder_check_does_not_backfill_a_long_past_due_date():
+    # Without the grace window, switching from "== today" to ">= remind_at" would make the first
+    # sweep after deploy notify about every historical unpaid bill at once.
+    store = {"bills": {"rows": [_bill_row(due_date="2020-01-15")], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    assert client.post("/run-reminder-check", auth=AUTH).json()["reminders_sent"] == 0
+    assert store["bills"]["rows"][0]["reminder_sent_at"] is None
+
+
+def test_run_reminder_check_body_works_when_an_exact_bill_has_no_due_date():
+    store = {"bills": {"rows": [_bill_row(reminder_mode="exact", reminder_at=_past_instant(), due_date=None)], "inserts": []}}
+    client, _ = _build_app(store, {})
+
+    client.post("/run-reminder-check", auth=AUTH)
+    body = store["notifications"]["inserts"][0]["body"]
+    assert "None" not in body
+    assert "British Gas" in body
