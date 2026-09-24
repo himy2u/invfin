@@ -3,6 +3,29 @@
 Read this first in any new/resumed session. Update it before ending any substantial chunk of work
 — this is the thing that lets a session pick up cold after a disconnect.
 
+## Open blocker as of 2026-09-24 — reminder scheduler needs two secrets a human must copy
+
+The bill-reminder sweep now runs on a schedule (`.github/workflows/reminder-check.yml`, every 5
+minutes, free on this public repo — a Render Cron Job would cost $1/month minimum and has no free
+tier). It is live and running, but it **skips with a workflow annotation instead of sweeping**,
+because two repository secrets are missing:
+
+- `INBOUND_EMAIL_WEBHOOK_USER`
+- `INBOUND_EMAIL_WEBHOOK_PASSWORD`
+
+These must be the values on the **Render** `invfin-agent` service (Environment tab), not the ones in
+`.env.local` — those are different and the deployed endpoint rejects them (verified: 401). They were
+not copied automatically on purpose: moving them would have meant putting a credential value into a
+shell command, which `rules/secrets-discipline.md` forbids. To finish the wiring, from the Render
+Environment tab copy each value and run, once each:
+
+    gh secret set INBOUND_EMAIL_WEBHOOK_USER --repo himy2u/invfin
+    gh secret set INBOUND_EMAIL_WEBHOOK_PASSWORD --repo himy2u/invfin
+
+(both read the value from stdin, so nothing is echoed). No code change is needed afterwards — the
+next scheduled run sweeps for real. `AGENT_SERVICE_URL` is already set to
+`https://invfin-agent.onrender.com`.
+
 ## Goal
 
 Build a minimal invoicing product (web + mobile) that wins customers from Wave/Xero/Square by
