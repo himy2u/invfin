@@ -26,6 +26,14 @@ if os.environ.get("ENABLE_EMAIL_BILL_DETECTION", "").lower() in ("1", "true", "y
     app.include_router(email_bill_router)
     logger.info("email bill detection feature enabled")
 
+# Dev-only: lets a tester skip the OTP login screen entirely. Must never be set on the deployed
+# Render service — it mints a real session for a fixed account with no password check at all.
+if os.environ.get("ENABLE_DEV_TEST_LOGIN", "").lower() in ("1", "true", "yes"):
+    from dev_login_router import router as dev_login_router
+
+    app.include_router(dev_login_router)
+    logger.warning("dev test login enabled — do not set this in production")
+
 # The web app proxies through a Next.js API route (no browser CORS involved), but the mobile app
 # calls this service directly from the client — and on the web-rendered mobile target
 # (react-native-web / task dev:mobile:web), that's a real browser enforcing CORS. Any JSON POST

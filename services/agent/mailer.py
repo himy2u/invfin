@@ -72,13 +72,46 @@ def _send_via_postmark(msg: EmailMessage) -> None:
         timeout=15,
     )
     # Raises on a non-2xx so the caller's own try/except decides what to do. Postmark answers 422
-    # with a specific ErrorCode for the two misconfigurations that matter most here: 300 (the From
-    # address isn't a confirmed sender signature) and 405 (the account is still pending approval
-    # and may only send to its own verified addresses), so log the body before raising, otherwise
-    # the reason never reaches the logs.
+    # with a specific ErrorCode identifying which misconfiguration it was (see _POSTMARK_REASONS
+    # below), so log the body before raising, otherwise the reason never reaches the logs.
     if response.status_code >= 400:
         logger.error("postmark send rejected", status=response.status_code, body=response.text[:500])
     response.raise_for_status()
+
+
+# Postmark's own documented ErrorCode values (postmarkapp.com/developer/api/overview), mapped to
+# the reason strings /send-test-reminder reports. Checked against the docs rather than guessed —
+# an earlier comment in this file claimed 300 meant "unconfirmed sender signature", which is wrong:
+# 300 is generic send validation (bad address, missing body, limits exceeded), so it maps to the
+# catch-all send_failed, not to a sender-verification reason the UI would then explain incorrectly.
+#
+#   400 Sender Signature not found          -> the From address was never added in Postmark
+#   401 Sender signature not confirmed      -> added but the confirmation email wasn't clicked
+#   405 Not allowed to send                 -> account restricted, in practice pending approval
+#   412 While your account is pending approval, all recipients must share the From domain
+#   413 This account is not approved to send email
+_POSTMARK_REASONS = {
+    400: "sender_not_verified",
+    401: "sender_not_verified",
+    405: "sender_pending_approval",
+    412: "sender_pending_approval",
+    413: "sender_pending_approval",
+}
+
+
+def postmark_rejection_reason(exc: Exception) -> str:
+    """Why a send_* call failed, as one of the reason strings /send-test-reminder reports.
+
+    Pure inspection of an already-raised exception — the send path itself is unchanged, so the real
+    reminder cron keeps behaving exactly as before and only the test endpoint reads this."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return "send_failed"
+    try:
+        error_code = response.json().get("ErrorCode")
+    except Exception:
+        return "send_failed"
+    return _POSTMARK_REASONS.get(error_code, "send_failed")
 
 
 def _send(msg: EmailMessage) -> None:

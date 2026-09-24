@@ -21,7 +21,7 @@ from email_bill_detect import (
     extract_bill_from_email,
 )
 from logging_setup import logger
-from mailer import send_bill_reminder_email
+from mailer import postmark_rejection_reason, send_bill_reminder_email
 from push import send_push_notification
 from reminder_scheduling import reminder_due_today
 
@@ -189,6 +189,81 @@ def _notify_user(client, user_id: str, bill_id: str | None, title: str, body: st
                 send_push_notification(row["expo_push_token"], title, body)
         except Exception as exc:
             logger.warning("push lookup/send failed", error=str(exc), user_id=user_id)
+
+
+def _notify_user_reporting_channels(
+    client, user_id: str, bill_id: str | None, title: str, body: str, notif_type: str
+) -> dict[str, dict]:
+    """Same fan-out as _notify_user, but reports what actually happened on each channel.
+
+    Used ONLY by /send-test-reminder. _notify_user itself is untouched, so the real reminder cron
+    keeps its existing behavior and return contract — the whole point of a test send is to tell the
+    user the truth about delivery, and that honesty requirement doesn't extend to changing the
+    production path's shape.
+
+    Each entry is {"attempted": bool, "delivered": bool, "reason": str?}. `attempted: false` covers
+    both "the user turned this channel off" (reason channel_disabled) and "there was nothing to
+    deliver to" (reason no_registered_device) — the UI needs to tell those two apart to say
+    anything useful."""
+    channels = _get_reminder_channels(client, user_id)
+    result: dict[str, dict] = {}
+
+    # In-app is reported explicitly rather than assumed: it is a database write like any other and
+    # it can fail. Note it is attempted unconditionally, matching _notify_user — the in_app
+    # preference gates the notification UI, not this insert.
+    try:
+        client.table("notifications").insert(
+            {"user_id": user_id, "type": notif_type, "title": title, "body": body, "related_bill_id": bill_id}
+        ).execute()
+        result["in_app"] = {"attempted": True, "delivered": True}
+    except Exception as exc:
+        logger.warning("in-app notification write failed", error=str(exc), user_id=user_id)
+        result["in_app"] = {"attempted": True, "delivered": False, "reason": "send_failed"}
+
+    if not channels.get("email", True):
+        result["email"] = {"attempted": False, "delivered": False, "reason": "channel_disabled"}
+    else:
+        try:
+            user = client.auth.admin.get_user_by_id(user_id)
+            email = user.user.email if user and user.user else None
+        except Exception as exc:
+            logger.warning("reminder email address lookup failed", error=str(exc), user_id=user_id)
+            email = None
+        if not email:
+            # No address to send to is the email equivalent of push's zero-tokens case: nothing was
+            # ever attempted, and saying "failed" would imply we tried.
+            result["email"] = {"attempted": False, "delivered": False, "reason": "no_registered_device"}
+        else:
+            try:
+                send_bill_reminder_email(email, title, body)
+                result["email"] = {"attempted": True, "delivered": True}
+            except Exception as exc:
+                reason = postmark_rejection_reason(exc)
+                logger.warning("reminder email send failed", error=str(exc), reason=reason, user_id=user_id)
+                result["email"] = {"attempted": True, "delivered": False, "reason": reason}
+
+    if not channels.get("push", True):
+        result["push"] = {"attempted": False, "delivered": False, "reason": "channel_disabled"}
+    else:
+        try:
+            tokens = client.table("push_tokens").select("expo_push_token").eq("user_id", user_id).execute()
+            rows = tokens.data or []
+        except Exception as exc:
+            logger.warning("push token lookup failed", error=str(exc), user_id=user_id)
+            rows = []
+        if not rows:
+            result["push"] = {"attempted": False, "delivered": False, "reason": "no_registered_device"}
+        else:
+            # A list, not a generator: any() would short-circuit and skip the user's other devices
+            # the moment one succeeded. Any one device receiving it counts as delivered.
+            delivered = any([send_push_notification(row["expo_push_token"], title, body) for row in rows])
+            result["push"] = (
+                {"attempted": True, "delivered": True}
+                if delivered
+                else {"attempted": True, "delivered": False, "reason": "send_failed"}
+            )
+
+    return result
 
 
 _MAX_QUEUE_ATTEMPTS = 3
@@ -508,15 +583,7 @@ async def check_new_bills(credentials: HTTPAuthorizationCredentials = Depends(_b
     return result
 
 
-@router.post("/send-test-reminder")
-async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict[str, str]:
-    # Lets a user verify reminder delivery (email/push/in-app) actually works right now, without
-    # waiting for a bill's real due date. Deliberately does NOT
-    # touch reminder_sent_at or go through claim_bill_reminder — those belong only to the real
-    # once-per-bill reminder cron, and a test send must never suppress that later real reminder.
-    client = get_service_client()
-    user_id = _user_id_from_session(client, credentials)
-
+def _send_test_reminder_sync(client, user_id: str) -> dict:
     bill_row = (
         client.table("bills")
         .select("id, vendor_name, due_date")
@@ -530,7 +597,7 @@ async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends
         raise HTTPException(400, "no detected bill to send a test reminder for yet")
     bill = bill_row.data[0]
 
-    _notify_user(
+    channels = _notify_user_reporting_channels(
         client,
         user_id,
         bill["id"],
@@ -538,7 +605,29 @@ async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends
         f"This is a test reminder for {bill['vendor_name']} (due {bill['due_date']}). Real reminders arrive once, this close to the due date you set.",
         "bill_reminder",
     )
-    return {"status": "sent", "bill_id": bill["id"]}
+    return {"bill_id": bill["id"], "channels": channels}
+
+
+@router.post("/send-test-reminder")
+async def send_test_reminder(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> dict:
+    # Lets a user verify reminder delivery (email/push/in-app) actually works right now, without
+    # waiting for a bill's real due date. Deliberately does NOT
+    # touch reminder_sent_at or go through claim_bill_reminder — those belong only to the real
+    # once-per-bill reminder cron, and a test send must never suppress that later real reminder.
+    #
+    # Returns a per-channel result, never a blanket "sent": the three channels succeed and fail
+    # independently, and this endpoint previously reported success for all three whenever the
+    # in-app insert alone worked — which is exactly the kind of lie about delivery this product
+    # exists to not tell.
+    client = get_service_client()
+    user_id = _user_id_from_session(client, credentials)
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_send_test_reminder_sync, client, user_id), timeout=60)
+    except HTTPException:
+        raise
+    except asyncio.TimeoutError as exc:
+        logger.error("test reminder timed out", user_id=user_id)
+        raise HTTPException(504, "test reminder timed out") from exc
 
 
 _QUEUE_SWEEP_BATCH_SIZE = 20

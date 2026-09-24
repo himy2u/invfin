@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import * as Notifications from "expo-notifications";
+import Constants, { ExecutionEnvironment } from "expo-constants";
 import { supabase } from "./supabase";
 
 // Best-effort only — a user who denies notification permission, or the web dev target (which has
@@ -8,7 +8,17 @@ import { supabase } from "./supabase";
 export async function registerForPushNotificationsAsync(): Promise<void> {
   if (Platform.OS === "web") return;
 
+  // Android remote push was removed from Expo Go entirely as of SDK 53 — merely *importing*
+  // expo-notifications throws there (not just calling its functions), which crashed the whole root
+  // layout before this function's own guard ever ran, since _layout.tsx statically imports this
+  // file. Importing the module dynamically, only after this check, keeps it from ever loading in
+  // the one environment where loading it is itself the crash. A real dev build (not Expo Go) never
+  // hits this branch and imports normally.
+  const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
+  if (Platform.OS === "android" && isExpoGo) return;
+
   try {
+    const Notifications = await import("expo-notifications");
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let status = existingStatus;
     if (status !== "granted") {

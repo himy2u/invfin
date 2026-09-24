@@ -3,12 +3,34 @@ import { View, Text, TextInput, Pressable, StyleSheet, KeyboardAvoidingView, Pla
 import { supabase } from "../lib/supabase";
 import { colors, spacing, radius, typography, card, input as inputStyle, primaryButton, cardShadow } from "../lib/theme";
 
+const AGENT_SERVICE_URL = process.env.EXPO_PUBLIC_AGENT_SERVICE_URL;
+
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [step, setStep] = useState<"email" | "code">("email");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [devLoading, setDevLoading] = useState(false);
+
+  // __DEV__ only — lets a tester on the same network skip email OTP delivery entirely (which
+  // depends on external mail infra that's unreliable in dev) and see the real account's real data.
+  // The endpoint itself doesn't exist on the deployed agent service, so this is a no-op there.
+  async function devSkipLogin() {
+    setError(null);
+    setDevLoading(true);
+    try {
+      const res = await fetch(`${AGENT_SERVICE_URL}/dev/test-session`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      const { access_token, refresh_token } = await res.json();
+      const { error } = await supabase.auth.setSession({ access_token, refresh_token });
+      if (error) setError(error.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "dev login failed");
+    } finally {
+      setDevLoading(false);
+    }
+  }
 
   async function sendCode() {
     setError(null);
@@ -76,6 +98,19 @@ export default function LoginScreen() {
               >
                 <Text style={styles.buttonText}>{loading ? "Sending…" : "Send code"}</Text>
               </Pressable>
+
+              {__DEV__ && (
+                <Pressable
+                  style={styles.linkRow}
+                  onPress={devSkipLogin}
+                  disabled={devLoading}
+                  testID="dev-skip-login-button"
+                >
+                  <Text style={styles.link}>
+                    {devLoading ? "Signing in…" : "Skip login (test mode, dev only)"}
+                  </Text>
+                </Pressable>
+              )}
             </>
           ) : (
             <>

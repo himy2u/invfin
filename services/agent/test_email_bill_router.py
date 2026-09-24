@@ -14,10 +14,12 @@ os.environ.setdefault("GEMINI_API_KEY", "unused-in-these-tests")
 # like a routing regression but is purely ambient-environment leakage.
 os.environ["EMAIL_FORWARDING_DOMAIN"] = "inbox.invfin.app"
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import email_bill_router
+import mailer
 from email_bill_detect import BillExtractionFailed, BillExtractionResult, ClassifyResult, LineItemDraft
 
 AUTH = ("testuser", "testpass")
@@ -257,7 +259,7 @@ def test_send_test_reminder_rejects_when_no_detected_bill_yet():
     assert response.status_code == 400
 
 
-def test_send_test_reminder_sends_without_touching_reminder_sent_at():
+def _test_reminder_store(channels=None, push_tokens=()):
     store = {
         "bills": {
             "rows": [
@@ -270,17 +272,129 @@ def test_send_test_reminder_sends_without_touching_reminder_sent_at():
                     "reminder_sent_at": None,
                 }
             ]
-        }
+        },
+        "push_tokens": {"rows": [{"user_id": "u1", "expo_push_token": t} for t in push_tokens], "inserts": []},
     }
+    if channels is not None:
+        store["profiles"] = {"rows": [{"user_id": "u1", "reminder_channels": channels}], "inserts": []}
+    return store
+
+
+def _stub_channels(monkeypatch, *, email=None, push=None):
+    """Replaces the two real outbound sends. email=None means "succeeds"; pass an exception to
+    raise instead. push=None means "the Expo call succeeded"; pass False for a send that failed."""
+
+    def _email(_to, _subject, _body):
+        if email is not None:
+            raise email
+
+    monkeypatch.setattr(email_bill_router, "send_bill_reminder_email", _email)
+    monkeypatch.setattr(email_bill_router, "send_push_notification", lambda *_args: True if push is None else push)
+
+
+def _send_test_reminder(client):
+    return client.post("/send-test-reminder", headers={"Authorization": "Bearer valid-user-token"})
+
+
+def test_send_test_reminder_reports_every_channel_delivered(monkeypatch):
+    store = _test_reminder_store(push_tokens=("ExponentPushToken[abc]",))
     client, _ = _build_app(store, {})
-    response = client.post("/send-test-reminder", headers={"Authorization": "Bearer valid-user-token"})
+    _stub_channels(monkeypatch)
+
+    response = _send_test_reminder(client)
     assert response.status_code == 200
-    assert response.json() == {"status": "sent", "bill_id": "bill-1"}
+    assert response.json() == {
+        "bill_id": "bill-1",
+        "channels": {
+            "in_app": {"attempted": True, "delivered": True},
+            "email": {"attempted": True, "delivered": True},
+            "push": {"attempted": True, "delivered": True},
+        },
+    }
     # A test reminder must never mark the real reminder as already sent for this bill.
     assert store["bills"]["rows"][0]["reminder_sent_at"] is None
     notif = store["notifications"]["inserts"][0]
     assert notif["type"] == "bill_reminder"
     assert "Acme Water" in notif["body"]
+
+
+def test_send_test_reminder_reports_email_blocked_by_pending_approval(monkeypatch):
+    # The exact live failure this endpoint used to report as "sent": Postmark 412, the account is
+    # still pending approval so it will only deliver to the From address's own domain.
+    store = _test_reminder_store(push_tokens=("ExponentPushToken[abc]",))
+    client, _ = _build_app(store, {})
+    rejection = httpx.HTTPStatusError(
+        "422",
+        request=httpx.Request("POST", mailer._POSTMARK_SEND_URL),
+        response=httpx.Response(422, json={"ErrorCode": 412, "Message": "pending approval"}),
+    )
+    _stub_channels(monkeypatch, email=rejection)
+
+    body = _send_test_reminder(client).json()
+    assert body["channels"]["email"] == {
+        "attempted": True,
+        "delivered": False,
+        "reason": "sender_pending_approval",
+    }
+    # The other two channels are unaffected — that independence is the whole point.
+    assert body["channels"]["in_app"]["delivered"] is True
+    assert body["channels"]["push"]["delivered"] is True
+
+
+def test_send_test_reminder_reports_email_blocked_by_unverified_sender(monkeypatch):
+    store = _test_reminder_store()
+    client, _ = _build_app(store, {})
+    rejection = httpx.HTTPStatusError(
+        "422",
+        request=httpx.Request("POST", mailer._POSTMARK_SEND_URL),
+        response=httpx.Response(422, json={"ErrorCode": 401, "Message": "Sender signature not confirmed"}),
+    )
+    _stub_channels(monkeypatch, email=rejection)
+
+    body = _send_test_reminder(client).json()
+    assert body["channels"]["email"] == {"attempted": True, "delivered": False, "reason": "sender_not_verified"}
+
+
+def test_send_test_reminder_reports_push_with_zero_registered_devices(monkeypatch):
+    # Nothing was ever attempted, so this must not read as either "sent" or "failed to send".
+    store = _test_reminder_store(push_tokens=())
+    client, _ = _build_app(store, {})
+    _stub_channels(monkeypatch)
+
+    body = _send_test_reminder(client).json()
+    assert body["channels"]["push"] == {"attempted": False, "delivered": False, "reason": "no_registered_device"}
+
+
+def test_send_test_reminder_reports_push_turned_off_in_prefs(monkeypatch):
+    # Distinct from the zero-devices case above: same attempted=false, different reason, because
+    # the UI tells the user to turn it back on rather than to open the app on their phone.
+    store = _test_reminder_store(
+        channels={"push": False, "email": True, "in_app": True}, push_tokens=("ExponentPushToken[abc]",)
+    )
+    client, _ = _build_app(store, {})
+    _stub_channels(monkeypatch)
+
+    body = _send_test_reminder(client).json()
+    assert body["channels"]["push"] == {"attempted": False, "delivered": False, "reason": "channel_disabled"}
+    assert body["channels"]["email"]["delivered"] is True
+
+
+def test_send_test_reminder_reports_a_failing_in_app_insert(monkeypatch):
+    store = _test_reminder_store()
+    client, fake_client = _build_app(store, {})
+    _stub_channels(monkeypatch)
+
+    original_table = fake_client.table
+
+    def _failing_table(name):
+        if name == "notifications":
+            raise RuntimeError("insert into notifications failed")
+        return original_table(name)
+
+    fake_client.table = _failing_table
+
+    body = _send_test_reminder(client).json()
+    assert body["channels"]["in_app"] == {"attempted": True, "delivered": False, "reason": "send_failed"}
 
 
 def test_inbound_email_ignored_when_detection_disabled():
