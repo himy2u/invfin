@@ -48,6 +48,18 @@ jobs:
           # No `set -x`: the Basic Auth credentials are on the curl command line and tracing would
           # print them into a world-readable log on a public repository.
           set -euo pipefail
+
+          # The webhook credentials are whatever the Render service has configured, and they are
+          # NOT the ones in a developer's .env.local. Until someone copies them into this repo's
+          # Actions secrets, every run would 401 — 288 failed runs and 288 failure emails a day.
+          # So an unset secret is annotated and skipped rather than hammered: the annotation is
+          # visible on every run in the Actions tab, so this is a loud no-op, not a silent one,
+          # and the sweep starts working the moment the secrets are filled in with no other change.
+          if [ -z "${WEBHOOK_USER}" ] || [ -z "${WEBHOOK_PASSWORD}" ]; then
+            echo "::warning title=Reminder sweep not configured::INBOUND_EMAIL_WEBHOOK_USER / INBOUND_EMAIL_WEBHOOK_PASSWORD are not set as repository secrets, so no reminder sweep ran. Copy both from the invfin-agent service's Environment tab on Render."
+            exit 0
+          fi
+
           curl --fail-with-body --silent --show-error \
             --retry 2 --retry-delay 10 --max-time 90 \
             -X POST "${AGENT_SERVICE_URL%/}/run-reminder-check" \
