@@ -246,30 +246,31 @@ export function PendingReviewSection({
       {isTable && (
         // Header row only, not a real <table>: the rows below have to collapse to a stacked card on
         // a narrow screen, which a table can't do. Hidden under sm for the same reason.
-        <div className="hidden grid-cols-[2fr_1fr_1fr_auto] items-center gap-3 border-b border-zinc-200 px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid">
+        <div className="hidden grid-cols-[2fr_1fr_1fr] items-center gap-3 border-b border-zinc-200 px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid">
           <span>Vendor</span>
           <span>Due</span>
           <span>Amount</span>
-          <span className="text-right">Remind me &amp; approve</span>
         </div>
       )}
 
       <div className={isTable ? "flex flex-col divide-y divide-zinc-100" : "flex flex-col gap-2"}>
         {bills.map((b) =>
           isTable ? (
-            <div
-              key={b.id}
-              data-testid="pending-review-row"
-              className="flex flex-col gap-2 px-3 py-3 sm:grid sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-center sm:gap-3"
-            >
-              <p className="text-sm font-medium text-zinc-900">{b.vendor_name}</p>
-              <p className="text-sm" data-testid="pending-review-due-date">
-                {dueDate(b)}
-              </p>
-              <p className="text-sm text-zinc-700">
-                {(b.total_cents / 100).toFixed(2)} {b.currency}
-              </p>
-              <div className="flex flex-wrap items-center justify-end gap-3">
+            // Two lines, not one: the reminder controls are a segmented toggle plus two fields, far
+            // too wide to share a row with the data columns without squeezing the vendor and due
+            // date into two-line wraps (which is exactly what a one-line version did). Still inline
+            // in the row — no modal — just stacked beneath it.
+            <div key={b.id} data-testid="pending-review-row" className="flex flex-col gap-2 px-3 py-3">
+              <div className="flex flex-col gap-0.5 sm:grid sm:grid-cols-[2fr_1fr_1fr] sm:items-center sm:gap-3">
+                <p className="text-sm font-medium text-zinc-900">{b.vendor_name}</p>
+                <p className="text-sm" data-testid="pending-review-due-date">
+                  {dueDate(b)}
+                </p>
+                <p className="text-sm text-zinc-700">
+                  {(b.total_cents / 100).toFixed(2)} {b.currency}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 {reminderInput(b)}
                 {actions(b)}
               </div>
