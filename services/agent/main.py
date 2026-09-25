@@ -62,6 +62,25 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/version")
+def version() -> dict[str, str]:
+    """Which commit is actually running.
+
+    This service has no auto-deploy on push: a backend change is live only after someone clicks
+    Manual Deploy in Render. Until now there was no way to tell from outside whether that had
+    happened, so "deployed" was something you asserted rather than checked, and a change that never
+    shipped looked identical to one that did.
+
+    RENDER_GIT_COMMIT is injected by Render itself on every deploy. Unauthenticated on purpose and
+    safe to be: a commit SHA of a public repo is not a secret, and requiring a credential to answer
+    "are you running my code" would defeat the point of having it.
+    """
+    return {
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "unknown"),
+        "branch": os.environ.get("RENDER_GIT_BRANCH", "unknown"),
+    }
+
+
 _CSV_TYPES = {"text/csv", "application/csv", "application/vnd.ms-excel"}
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB — a phone photo or a spreadsheet CSV both fit easily;
 # anything larger has no legitimate reason to reach this endpoint and would otherwise cost
