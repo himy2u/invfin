@@ -3,28 +3,39 @@
 Read this first in any new/resumed session. Update it before ending any substantial chunk of work
 — this is the thing that lets a session pick up cold after a disconnect.
 
-## Open blocker as of 2026-09-24 — reminder scheduler needs two secrets a human must copy
+## Open blocker as of 2026-09-25: the agent service is running old code
 
-The bill-reminder sweep now runs on a schedule (`.github/workflows/reminder-check.yml`, every 5
-minutes, free on this public repo — a Render Cron Job would cost $1/month minimum and has no free
-tier). It is live and running, but it **skips with a workflow annotation instead of sweeping**,
-because two repository secrets are missing:
+Everything below is committed and pushed to `main` (HEAD `7e99424`). The web and mobile halves are
+live the moment Vercel/Expo pick them up, but `services/agent` has **no auto-deploy on push**, and
+this session had no Render credentials, no Render CLI and no deploy hook, so the click could not be
+made from here.
 
-- `INBOUND_EMAIL_WEBHOOK_USER`
-- `INBOUND_EMAIL_WEBHOOK_PASSWORD`
+**What has to happen:** Render dashboard, service `invfin-agent` (`srv-dapchkrtqb8s73ffapsg`),
+Manual Deploy, "Deploy latest commit".
 
-These must be the values on the **Render** `invfin-agent` service (Environment tab), not the ones in
-`.env.local` — those are different and the deployed endpoint rejects them (verified: 401). They were
-not copied automatically on purpose: moving them would have meant putting a credential value into a
-shell command, which `rules/secrets-discipline.md` forbids. To finish the wiring, from the Render
-Environment tab copy each value and run, once each:
+**Verified still-old before handing over** (so there is no ambiguity about whether it shipped):
 
-    gh secret set INBOUND_EMAIL_WEBHOOK_USER --repo himy2u/invfin
-    gh secret set INBOUND_EMAIL_WEBHOOK_PASSWORD --repo himy2u/invfin
+    curl https://invfin-agent.onrender.com/version
+    # now: {"detail":"Not Found"}   -> old code
+    # after the deploy: {"commit":"7e99424...","branch":"main"}
 
-(both read the value from stdin, so nothing is echoed). No code change is needed afterwards — the
-next scheduled run sweeps for real. `AGENT_SERVICE_URL` is already set to
-`https://invfin-agent.onrender.com`.
+`/version` was added this session precisely because nothing reported the running commit, so
+"deployed" was previously an assertion rather than a check.
+
+A second, behavioural confirmation, which is the thing users actually feel. A test reminder's body
+must name the amount:
+
+    # old (confirmed live 2026-09-25): "This is a test reminder for Kestrel Property Mgmt (due 2026-11-04)."
+    # new:                             "Kestrel Property Mgmt: $14,900.00 due 2026-11-04. This is a test; ..."
+
+Until that deploy happens, the three agent-side fixes (amount in reminder bodies, the vendor's real
+invoice number, the zero-total extraction guard) are in `main` but not in production. The DB
+migration `20260925100000` IS already applied to the hosted project, and is deliberately
+backwards-compatible: `p_invoice_number` is last and defaulted, so the currently-deployed
+9-argument call keeps working until the deploy lands.
+
+The earlier blocker on this list (the two `INBOUND_EMAIL_WEBHOOK_*` repository secrets the reminder
+sweep needed) is **resolved**: both are set on the repo as of 2026-09-24.
 
 ## Goal
 
