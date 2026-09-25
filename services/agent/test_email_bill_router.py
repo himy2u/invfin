@@ -282,6 +282,8 @@ def _test_reminder_store(channels=None, push_tokens=()):
                     "user_id": "u1",
                     "vendor_name": "Acme Water",
                     "due_date": "2026-12-01",
+                    "total_cents": 14900,
+                    "currency": "USD",
                     "source": "email",
                     "reminder_sent_at": None,
                 }
@@ -840,6 +842,8 @@ def _bill_row(**overrides):
         "user_id": "u1",
         "vendor_name": "British Gas",
         "status": "unpaid",
+        "total_cents": 124860,
+        "currency": "GBP",
         "due_date": None,
         "reminder_mode": "offset",
         "reminder_offset_value": 2,
@@ -924,3 +928,33 @@ def test_run_reminder_check_body_works_when_an_exact_bill_has_no_due_date():
     body = store["notifications"]["inserts"][0]["body"]
     assert "None" not in body
     assert "British Gas" in body
+
+
+def test_run_reminder_check_body_names_the_amount():
+    # The amount is the fact that decides whether a reminder is worth acting on today. A body naming
+    # only the vendor and a date was the single most-noted gap in live end-to-end testing.
+    store = {
+        "bills": {
+            "rows": [_bill_row(due_date="2026-12-01", reminder_mode="exact", reminder_at=_past_instant())],
+            "inserts": [],
+        }
+    }
+    client, _ = _build_app(store, {})
+
+    assert client.post("/run-reminder-check", auth=AUTH).status_code == 200
+    body = store["notifications"]["inserts"][0]["body"]
+    assert "£1,248.60" in body
+    assert "British Gas" in body
+    assert "2026-12-01" in body
+
+
+def test_send_test_reminder_body_names_the_amount_too():
+    # Same body shape as the real path above: a test that renders differently from the real thing
+    # isn't testing the real thing.
+    store = _test_reminder_store()
+    client, _ = _build_app(store, {})
+    response = client.post("/send-test-reminder", headers={"Authorization": "Bearer valid-user-token"})
+    assert response.status_code == 200
+    body = store["notifications"]["inserts"][0]["body"]
+    assert "$149.00" in body
+    assert "Acme Water" in body

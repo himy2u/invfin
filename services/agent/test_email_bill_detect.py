@@ -1,4 +1,13 @@
-from email_bill_detect import detect_gmail_confirmation_link
+import pytest
+
+from email_bill_detect import (
+    BillExtractionFailed,
+    BillExtractionResult,
+    LineItemDraft,
+    _validated_total,
+    detect_gmail_confirmation_link,
+    find_currency_amounts,
+)
 
 # Captured verbatim from a real Gmail forwarding-confirmation email via the Postmark API
 # (2026-09-23) — the previous fixture here was a guessed "confirmation code" template that never
@@ -54,3 +63,62 @@ def test_returns_none_for_unrelated_email() -> None:
 def test_returns_none_when_forwarding_mentioned_but_no_link() -> None:
     link = detect_gmail_confirmation_link("Forwarding enabled", "Forwarding has been turned on for your account.")
     assert link is None
+
+
+# --- zero-total guard --------------------------------------------------------------------------
+# A real forwarded bill with an itemized product list in the body extracted with the vendor and both
+# dates correct and a total of 0.00, and nothing on any screen indicated anything had gone wrong.
+# These cover the guard that turns that into either a correct amount or a loud failure. The Gemini
+# call itself is not exercised here (that's what the live end-to-end run is for). This is the
+# validation applied to whatever it returns.
+
+
+def test_zero_total_falls_back_to_the_printed_total() -> None:
+    result = BillExtractionResult(
+        vendor_name="Clayworks Wholesale",
+        currency="USD",
+        due_date="2026-10-15",
+        stated_total_amount=1248.60,
+        line_items=[
+            LineItemDraft(description="assorted ceramic vases", quantity=24, unit_price=0),
+            LineItemDraft(description="scented candle sets", quantity=60, unit_price=0),
+        ],
+    )
+    repaired = _validated_total(result, "Invoice CW-20461", "Total due: $1,248.60")
+    assert repaired.total_cents() == 124860
+    assert [i.description for i in repaired.line_items] == ["Amount due"]
+
+
+def test_zero_total_with_no_printed_total_fails_loudly() -> None:
+    result = BillExtractionResult(
+        vendor_name="Clayworks Wholesale",
+        currency="USD",
+        due_date="2026-10-15",
+        line_items=[LineItemDraft(description="assorted ceramic vases", quantity=24, unit_price=0)],
+    )
+    with pytest.raises(BillExtractionFailed) as exc:
+        _validated_total(result, "Invoice CW-20461", "Amount payable: $1,248.60 by 15 October")
+    # The amount the email plainly showed is named in the error, so the failure is diagnosable from
+    # the log alone rather than needing the original email re-fetched.
+    assert "1248.6" in str(exc.value)
+
+
+def test_a_correct_total_passes_through_untouched() -> None:
+    result = BillExtractionResult(
+        vendor_name="Clayworks Wholesale",
+        currency="USD",
+        due_date="2026-10-15",
+        stated_total_amount=1248.60,
+        line_items=[
+            LineItemDraft(description="assorted ceramic vases", quantity=24, unit_price=12.50),
+            LineItemDraft(description="scented candle sets", quantity=60, unit_price=15.81),
+        ],
+    )
+    assert _validated_total(result, "Invoice CW-20461", "Total due: $1,248.60") is result
+
+
+def test_currency_amounts_require_a_currency_marker() -> None:
+    # A quantity in parentheses and a bare invoice number must never read as money, or the guard
+    # would "find" an amount in an email that states none.
+    assert find_currency_amounts("assorted ceramic vases (24), invoice 20461, due 2026-10-15") == []
+    assert find_currency_amounts("Total due: $1,248.60 plus 45.00 EUR shipping") == [1248.6, 45.0]

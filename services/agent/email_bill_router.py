@@ -22,6 +22,7 @@ from email_bill_detect import (
 )
 from logging_setup import logger
 from mailer import postmark_rejection_reason, send_bill_reminder_email
+from money import format_money
 from push import send_push_notification
 from reminder_scheduling import compute_remind_at, reminder_due
 
@@ -152,12 +153,22 @@ _DEFAULT_CHANNELS = {"push": True, "email": True, "in_app": True}
 def _get_reminder_channels(client, user_id: str) -> dict:
     # Split out of _notify_user so preference resolution can be reasoned about (and tested)
     # independently of the send fan-out below it.
+    #
+    # limit(1) rather than single(): .single() RAISES when there is no profiles row, so a user who had
+    # simply never saved a preference produced a "failed to read reminder_channels" warning on every
+    # single reminder send. That is a scary-sounding log line for an ordinary state, repeated often
+    # enough to bury real warnings. create_detected_bill now creates the row up front (see
+    # 20260925100000_detected_bill_duplicates_and_real_numbers.sql), so its absence is genuinely
+    # unexpected; it is still not an error, and defaults still apply either way.
     try:
-        profile = client.table("profiles").select("reminder_channels").eq("user_id", user_id).single().execute()
-        return (profile.data or {}).get("reminder_channels") or dict(_DEFAULT_CHANNELS)
+        profile = client.table("profiles").select("reminder_channels").eq("user_id", user_id).limit(1).execute()
     except Exception as exc:
-        logger.warning("failed to read reminder_channels, defaulting to all on", error=str(exc), user_id=user_id)
+        logger.warning("reminder_channels lookup failed, defaulting to all on", error=str(exc), user_id=user_id)
         return dict(_DEFAULT_CHANNELS)
+    if not profile.data:
+        logger.info("no profiles row for user, defaulting reminder channels to all on", user_id=user_id)
+        return dict(_DEFAULT_CHANNELS)
+    return profile.data[0].get("reminder_channels") or dict(_DEFAULT_CHANNELS)
 
 
 def _notify_user(client, user_id: str, bill_id: str | None, title: str, body: str, notif_type: str) -> None:
@@ -407,6 +418,9 @@ def _process_claimed_row(client, row: dict) -> str | None:
                 "p_vendor_address": extraction.vendor_address,
                 "p_vendor_email": extraction.vendor_email,
                 "p_detected_email_message_id": message_id,
+                # The vendor's own number when the email stated one; create_detected_bill falls back
+                # to the generated EMAIL-<timestamp>-<random> form when this is null.
+                "p_invoice_number": extraction.invoice_number,
                 "p_line_items": [
                     {
                         "description": item.description,
@@ -428,7 +442,10 @@ def _process_claimed_row(client, row: dict) -> str | None:
             user_id,
             bill_id,
             "New bill detected",
-            f"We found a bill from {extraction.vendor_name} due {extraction.due_date}. Review it in the app.",
+            # The amount is the fact that decides whether this is worth opening now. A body naming
+            # only the vendor and a date made the user open the app to find out how much.
+            f"{extraction.vendor_name}: {format_money(extraction.total_cents(), extraction.currency)} "
+            f"due {extraction.due_date}. Review it in the app.",
             "bill_detected",
         )
         return bill_id
@@ -586,7 +603,7 @@ async def check_new_bills(credentials: HTTPAuthorizationCredentials = Depends(_b
 def _send_test_reminder_sync(client, user_id: str) -> dict:
     bill_row = (
         client.table("bills")
-        .select("id, vendor_name, due_date")
+        .select("id, vendor_name, due_date, total_cents, currency")
         .eq("user_id", user_id)
         .eq("source", "email")
         .order("created_at", desc=True)
@@ -602,7 +619,11 @@ def _send_test_reminder_sync(client, user_id: str) -> dict:
         user_id,
         bill["id"],
         "Test reminder",
-        f"This is a test reminder for {bill['vendor_name']} (due {bill['due_date']}). Real reminders arrive once, this close to the due date you set.",
+        # Same shape as the real reminder body built in _run_reminder_check, amount included. A test
+        # that renders differently from the real thing isn't testing the real thing.
+        f"{bill['vendor_name']}: {format_money(bill['total_cents'], bill['currency'])}"
+        + (f" due {bill['due_date']}" if bill["due_date"] else "")
+        + ". This is a test; real reminders arrive once, this close to the due date you set.",
         "bill_reminder",
     )
     return {"bill_id": bill["id"], "channels": channels}
@@ -694,7 +715,10 @@ def _run_reminder_check() -> dict[str, int]:
     # silently withholding every OTHER user's reminder for the day.
     bills = (
         client.table("bills")
-        .select("id, user_id, vendor_name, due_date, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
+        .select(
+            "id, user_id, vendor_name, due_date, total_cents, currency, "
+            "reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at"
+        )
         .eq("status", "unpaid")
         .is_("reminder_sent_at", "null")
         .execute()
@@ -726,10 +750,14 @@ def _run_reminder_check() -> dict[str, int]:
                 bill["id"],
                 "Bill due soon",
                 # An exact-mode reminder can be set on a bill with no due date at all, so the body
-                # has to work without one rather than print "is due None".
-                f"{bill['vendor_name']} is due {bill['due_date']}."
+                # has to work without one rather than print "is due None". The amount is always
+                # included: it is the number the user needs in order to act, and leaving it out meant
+                # every reminder required opening the app just to learn how much.
+                f"{bill['vendor_name']}: {format_money(bill['total_cents'], bill['currency'])} "
+                f"due {bill['due_date']}."
                 if bill["due_date"]
-                else f"You asked to be reminded about {bill['vendor_name']}.",
+                else f"{bill['vendor_name']}: {format_money(bill['total_cents'], bill['currency'])}. "
+                f"You asked to be reminded about this one.",
                 "bill_reminder",
             )
             sent += 1

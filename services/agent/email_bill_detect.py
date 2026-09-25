@@ -55,15 +55,30 @@ this exact shape, no other text, no markdown fences:
   "vendor_name": string,
   "vendor_address": string | null,
   "vendor_email": string | null,
+  "invoice_number": string | null,
   "currency": string (3-letter ISO code, e.g. "USD"),
   "issue_date": string (YYYY-MM-DD) | null,
   "due_date": string (YYYY-MM-DD),
+  "stated_total_amount": number | null,
   "line_items": [{"description": string, "quantity": number, "unit_price": number}]
 }
 If no line items are itemized, use a single line item with description "Amount due" and the total
 as unit_price with quantity 1. due_date is required — if genuinely no due date is printed anywhere,
 this email should not have reached this step; make your best reading of any date described as "due,"
-"pay by," or similar. Use raw numbers for money, no currency symbols."""
+"pay by," or similar. Use raw numbers for money, no currency symbols.
+
+invoice_number is the vendor's OWN reference for this bill as printed on it (e.g. "Invoice CW-20461"
+-> "CW-20461", "Bill #4471" -> "4471"). Null if the document states no such number. Do not invent
+one, and do not use an account number, a customer number, or a payment reference as a substitute.
+
+stated_total_amount is the single total payable as literally printed on the bill ("Total due:
+$1,248.60" -> 1248.60), null if no total is printed. Give it even when you have also itemized the
+line items: it is the cross-check on them.
+
+unit_price is the price of ONE unit, never the line's extended total. For a line reading
+"assorted ceramic vases (24) ... 12.50 ... 300.00", quantity is 24 and unit_price is 12.50, NOT
+300.00 and NOT 0. quantity x unit_price, summed across every line, must equal
+stated_total_amount."""
 
 # Confidence threshold is deliberately conservative — a false negative (a real bill not detected)
 # costs the user nothing beyond needing to enter it manually, same as today. A false positive
@@ -108,10 +123,21 @@ class BillExtractionResult(BaseModel):
     vendor_name: str
     vendor_address: str | None = None
     vendor_email: str | None = None
+    # The vendor's own reference for this bill, when the document states one. Defaulted to None so an
+    # older/leaner model response still validates rather than failing the whole extraction over a
+    # field that is legitimately absent from most bills.
+    invoice_number: str | None = None
     currency: str
     issue_date: str | None = None
     due_date: str
+    # The total as literally printed on the bill. Never stored; it exists purely as a cross-check on
+    # the line items, which are what the bill's total_cents is actually computed from.
+    stated_total_amount: float | None = None
     line_items: list[LineItemDraft]
+
+    def total_cents(self) -> int:
+        # Same arithmetic create_detected_bill does in SQL, so what this validates is what gets stored.
+        return sum(round(item.quantity * item.unit_price * 100) for item in self.line_items)
 
 
 class BillExtractionFailed(Exception):
@@ -173,6 +199,39 @@ def classify_bill_email(
     return result
 
 
+# Currency amounts as they appear in a real bill email, in either order: a symbol or ISO code before
+# the number ("$1,248.60", "USD 1248.60") or after it ("1,248.60 EUR"). Deliberately requires a
+# currency marker: a bare "24" from an itemized quantity, an invoice number, or a date fragment must
+# not read as money, which is the whole reason this isn't just \d+\.\d\d.
+_CURRENCY_CODES = (
+    "USD|EUR|GBP|JPY|INR|CAD|AUD|NZD|CHF|SEK|NOK|DKK|SGD|HKD|ZAR|AED|BRL|MXN|PLN|CZK|THB|MYR|PHP|IDR"
+)
+_AMOUNT_RE = re.compile(
+    rf"(?:(?:[$€£¥₹]|\b(?:{_CURRENCY_CODES})\b)\s*(?P<pre>\d[\d,]*(?:\.\d{{1,2}})?))"
+    rf"|(?:(?P<post>\d[\d,]*(?:\.\d{{1,2}})?)\s*(?:\b(?:{_CURRENCY_CODES})\b|[$€£¥₹]))",
+    re.IGNORECASE,
+)
+
+
+def find_currency_amounts(text: str) -> list[float]:
+    """Every number in `text` that is unambiguously a currency amount, largest first.
+
+    Not a parser and not trying to be. It exists so that "the extraction produced a zero total" can
+    be reported alongside "but the email plainly says 1248.60", which is the difference between a
+    diagnosable failure and a silent one.
+    """
+    found = []
+    for match in _AMOUNT_RE.finditer(text):
+        raw = match.group("pre") or match.group("post")
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+        if value > 0:
+            found.append(value)
+    return sorted(found, reverse=True)
+
+
 def extract_bill_from_email(
     api_key: str, subject: str, body_text: str, document: BillDocument | None = None
 ) -> BillExtractionResult:
@@ -182,9 +241,69 @@ def extract_bill_from_email(
     )
     try:
         data = json.loads(_strip_markdown_fence(response.text or "{}"))
-        return BillExtractionResult(**data)
+        result = BillExtractionResult(**data)
     except (json.JSONDecodeError, ValidationError) as exc:
         raise BillExtractionFailed(f"extraction output did not parse: {exc}") from exc
+
+    return _validated_total(result, subject, body_text)
+
+
+def _validated_total(result: BillExtractionResult, subject: str, body_text: str) -> BillExtractionResult:
+    """Refuses to return a bill whose total is zero.
+
+    A real forwarded bill with an itemized product list in the body ("assorted ceramic vases (24),
+    scented candle sets (60) ... Total due: $1,248.60") came back with the vendor and both dates
+    correct and a total of 0.00. Money wrong, everything else right, and nothing on any screen
+    suggesting anything had gone wrong. A bill that understates what's owed is worse than no bill at
+    all: the user acts on it, pays 0, and finds out from the vendor.
+
+    Two responses, in order of preference:
+
+      * The bill printed a total and the line items don't add up to it at all (they sum to zero).
+        Fall back to that printed total as a single line item: itemization is a nicety, the amount
+        owed is not. The itemization is lost, which is why this is logged loudly.
+      * Nothing usable. Raise BillExtractionFailed, which the queue already retries and then reports
+        to the user as "we couldn't read that bill", an outcome they can act on.
+
+    Zero is treated as unconditionally invalid rather than gated on "does the text also contain an
+    amount": there is no such thing as a bill for nothing, so no heuristic is needed to know that a
+    zero here is a failure. The amount scan still runs, to put the number the email actually showed
+    into the log next to the zero we computed.
+    """
+    total = result.total_cents()
+    stated = result.stated_total_amount
+
+    if total > 0:
+        if stated and abs(stated * 100 - total) > 1:
+            # Not repaired: with a plausible non-zero itemization AND a printed total that disagrees,
+            # either one could be the right answer (a printed total including tax over pre-tax lines
+            # is the common benign case) and picking one would be a guess presented as a fact. Logged
+            # so the disagreement is at least visible if it turns out to be a pattern.
+            logger.warning(
+                "bill line items disagree with the printed total",
+                line_items_cents=total,
+                stated_total_cents=round(stated * 100),
+                vendor=result.vendor_name[:80],
+            )
+        return result
+
+    amounts_in_text = find_currency_amounts(f"{subject}\n{body_text}")
+
+    if stated and stated > 0:
+        logger.warning(
+            "bill line items summed to zero, falling back to the printed total",
+            stated_total=stated,
+            vendor=result.vendor_name[:80],
+            line_item_count=len(result.line_items),
+        )
+        return result.model_copy(
+            update={"line_items": [LineItemDraft(description="Amount due", quantity=1, unit_price=stated)]}
+        )
+
+    raise BillExtractionFailed(
+        "extraction produced a zero total"
+        + (f"; amounts visible in the email text: {amounts_in_text[:5]}" if amounts_in_text else "")
+    )
 
 
 def detect_gmail_confirmation_link(subject: str, body_text: str) -> str | None:
