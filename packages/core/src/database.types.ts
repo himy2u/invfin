@@ -90,6 +90,7 @@ export type Database = {
           created_at: string
           currency: string
           detected_email_message_id: string | null
+          duplicate_of_bill_id: string | null
           discount_cents: number
           due_date: string | null
           id: string
@@ -120,6 +121,7 @@ export type Database = {
           created_at?: string
           currency?: string
           detected_email_message_id?: string | null
+          duplicate_of_bill_id?: string | null
           discount_cents?: number
           due_date?: string | null
           id?: string
@@ -150,6 +152,7 @@ export type Database = {
           created_at?: string
           currency?: string
           detected_email_message_id?: string | null
+          duplicate_of_bill_id?: string | null
           discount_cents?: number
           due_date?: string | null
           id?: string
@@ -830,6 +833,7 @@ export type Database = {
           p_currency: string
           p_detected_email_message_id?: string
           p_due_date: string
+          p_invoice_number?: string
           p_issue_date: string
           p_line_items?: Json
           p_user_id: string
