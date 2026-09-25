@@ -93,7 +93,20 @@ export function ConnectEmailWizard({
   const [confirmClicked, setConfirmClicked] = useState(false);
   const [hasDetectedBill, setHasDetectedBill] = useState(false);
   const [pendingBills, setPendingBills] = useState<
-    { id: string; vendor_name: string; total_cents: number; currency: string; due_date: string | null; reminder_mode: string; reminder_offset_value: number; reminder_offset_unit: string; reminder_at: string | null }[]
+    {
+      id: string;
+      vendor_name: string;
+      total_cents: number;
+      currency: string;
+      due_date: string | null;
+      reminder_mode: string;
+      reminder_offset_value: number;
+      reminder_offset_unit: string;
+      reminder_at: string | null;
+      bill_number: string;
+      duplicate_of_bill_id: string | null;
+      duplicate_of_bill_number: string | null;
+    }[]
   >([]);
   const [starting, setStarting] = useState(false);
   const [reminderTestStatus, setReminderTestStatus] = useState<"idle" | "sending" | "done" | "error">("idle");
@@ -125,6 +138,11 @@ export function ConnectEmailWizard({
     }
     setStarting(true);
     setError(null);
+    // Materializes the user's profiles row at the moment they opt into reminders, so
+    // reminder_channels has a real value from the first send rather than the agent service falling
+    // back to "all on" and logging a warning about not knowing the preference. create_detected_bill
+    // does the same thing server-side as a backstop for accounts that never came through here.
+    await supabase.from("profiles").upsert({ user_id: userId }, { onConflict: "user_id", ignoreDuplicates: true });
     const { data, error } = await supabase
       .from("email_forwarding_addresses")
       .upsert({ user_id: userId, enabled: true, source_email: sourceEmail.trim() }, { onConflict: "user_id" })
@@ -229,12 +247,24 @@ export function ConnectEmailWizard({
       // whether setup collapses, and an already-approved bill still answers that yes.
       const { data: bills } = await supabase
         .from("bills")
-        .select("id, vendor_name, total_cents, currency, due_date, status, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at")
+        .select(
+          "id, bill_number, vendor_name, total_cents, currency, due_date, status, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at, duplicate_of_bill_id",
+        )
         .eq("source", "email")
         .order("created_at", { ascending: false })
         .limit(50);
       if (!cancelled && bills) {
-        setPendingBills(bills.filter((b) => b.status === "pending_review"));
+        // The bill a duplicate points at is this same user's, so it's already in the rows just
+        // fetched, so it is resolved here and the review row can name it instead of printing a raw uuid.
+        const numberById = new Map(bills.map((b) => [b.id, b.bill_number]));
+        setPendingBills(
+          bills
+            .filter((b) => b.status === "pending_review")
+            .map((b) => ({
+              ...b,
+              duplicate_of_bill_number: b.duplicate_of_bill_id ? (numberById.get(b.duplicate_of_bill_id) ?? null) : null,
+            })),
+        );
         if (bills.length > 0) setHasDetectedBill(true);
       }
     };

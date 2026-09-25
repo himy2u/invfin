@@ -3,6 +3,14 @@ import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { supabase } from "../../lib/supabase";
 import { confirmAsync } from "../../lib/confirm";
+import { formatAmount, formatMoney } from "../../lib/money";
+import {
+  type ReminderDraft,
+  defaultExactAt,
+  describeReminder,
+  reminderUpdatePayload,
+} from "../../lib/reminder-draft";
+import { ReminderControls } from "../../components/ReminderControls";
 
 type BillDetail = {
   id: string;
@@ -19,6 +27,12 @@ type BillDetail = {
   due_date: string | null;
   po_number: string | null;
   terms: string | null;
+  reminder_mode: string;
+  reminder_offset_value: number;
+  reminder_offset_unit: string;
+  reminder_at: string | null;
+  reminder_sent_at: string | null;
+  duplicate_of_bill_id: string | null;
 };
 
 type LineItem = { description: string; quantity: number; unit_price_cents: number };
@@ -30,13 +44,19 @@ export default function BillDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [marking, setMarking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The reminder a bill was approved with was invisible and uneditable on this screen until now: the
+  // only place to configure it was the pending-review row, which disappears on approval. Mirrors
+  // apps/web/app/bills/[id]/reminder-editor.tsx, down to reusing the same control.
+  const [editingReminder, setEditingReminder] = useState(false);
+  const [reminderDraft, setReminderDraft] = useState<ReminderDraft | null>(null);
+  const [savingReminder, setSavingReminder] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
     supabase
       .from("bills")
       .select(
-        "id, bill_number, status, currency, subtotal_cents, tax_cents, total_cents, vendor_name, vendor_address, vendor_email, vendor_phone, due_date, po_number, terms",
+        "id, bill_number, status, currency, subtotal_cents, tax_cents, total_cents, vendor_name, vendor_address, vendor_email, vendor_phone, due_date, po_number, terms, reminder_mode, reminder_offset_value, reminder_offset_unit, reminder_at, reminder_sent_at, duplicate_of_bill_id",
       )
       .eq("id", id)
       .single()
@@ -83,7 +103,33 @@ export default function BillDetailScreen() {
     );
   }
 
-  const fmt = (cents: number) => `${(cents / 100).toFixed(2)} ${bill.currency}`;
+  const fmt = (cents: number) => formatMoney(cents, bill.currency);
+  const draft: ReminderDraft =
+    reminderDraft ?? {
+      mode: bill.reminder_mode === "exact" ? "exact" : "offset",
+      value: String(bill.reminder_offset_value),
+      unit: bill.reminder_offset_unit,
+      exactAt: defaultExactAt(bill.reminder_at, bill.due_date),
+    };
+
+  async function saveReminder() {
+    const result = reminderUpdatePayload(draft);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    setSavingReminder(true);
+    setError(null);
+    const { error: updateError } = await supabase.from("bills").update(result.payload).eq("id", bill!.id);
+    setSavingReminder(false);
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+    setEditingReminder(false);
+    setReminderDraft(null);
+    load();
+  }
 
   return (
     <ScrollView style={styles.container} testID="bill-detail-screen">
@@ -117,10 +163,53 @@ export default function BillDetailScreen() {
         </Text>
       </View>
 
+      {bill.duplicate_of_bill_id && (
+        <Text style={styles.duplicateFlag} testID="duplicate-bill-flag">
+          ⚠ Possible duplicate: another bill has the same vendor, amount and due date. If it’s the same bill forwarded
+          twice, mark one paid or delete it. We haven’t assumed either way.
+        </Text>
+      )}
+
+      {/* Only for a bill that can still get a reminder. A paid bill's reminder is spent history, and
+          offering to edit it would imply a notification is still coming. */}
+      {bill.status !== "paid" && (
+        <View style={styles.reminderBox} testID="bill-reminder">
+          <View style={styles.reminderHeader}>
+            <Text style={styles.reminderSummary} testID="bill-reminder-summary">
+              Reminder: {describeReminder(bill)}
+              {bill.reminder_sent_at ? ` · sent ${new Date(bill.reminder_sent_at).toLocaleString()}` : ""}
+            </Text>
+            <Pressable
+              testID="edit-bill-reminder"
+              onPress={() => {
+                setError(null);
+                setEditingReminder((v) => !v);
+              }}
+              style={styles.reminderEditButton}
+            >
+              <Text style={styles.reminderEditButtonText}>{editingReminder ? "Cancel" : "Edit"}</Text>
+            </Pressable>
+          </View>
+          {editingReminder && (
+            <View style={styles.reminderEditArea}>
+              <ReminderControls draft={draft} onChange={(patch) => setReminderDraft({ ...draft, ...patch })} />
+              <Pressable
+                testID="save-bill-reminder"
+                disabled={savingReminder}
+                onPress={saveReminder}
+                style={styles.reminderSaveButton}
+              >
+                <Text style={styles.reminderSaveButtonText}>{savingReminder ? "Saving…" : "Save reminder"}</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      )}
+
       {lineItems.map((item, i) => (
         <View key={i} style={styles.lineItemRow} testID="bill-line-item">
           <Text style={{ flex: 1 }}>{item.description}</Text>
-          <Text style={styles.amount}>{((item.quantity * item.unit_price_cents) / 100).toFixed(2)}</Text>
+          <Text style={styles.amount}>{formatAmount(item.quantity * item.unit_price_cents)}</Text>
         </View>
       ))}
 
@@ -164,6 +253,15 @@ const styles = StyleSheet.create({
   statusBadge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4, fontSize: 13, fontWeight: "600" },
   statusUnpaid: { backgroundColor: "#fef3c7", color: "#92400e" },
   statusPaid: { backgroundColor: "#d1fae5", color: "#065f46" },
+  duplicateFlag: { fontSize: 12, color: "#b45309", fontWeight: "600", marginBottom: 12 },
+  reminderBox: { borderWidth: 1, borderColor: "#e4e4e7", borderRadius: 8, padding: 10, marginBottom: 12, gap: 8 },
+  reminderHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  reminderSummary: { flex: 1, fontSize: 12, color: "#3f3f46", fontWeight: "600" },
+  reminderEditButton: { borderWidth: 1, borderColor: "#d4d4d8", borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
+  reminderEditButtonText: { fontSize: 11, color: "#52525b", fontWeight: "600" },
+  reminderEditArea: { gap: 10, borderTopWidth: 1, borderTopColor: "#f4f4f5", paddingTop: 10 },
+  reminderSaveButton: { backgroundColor: "#0f766e", borderRadius: 6, paddingVertical: 8, alignItems: "center" },
+  reminderSaveButtonText: { color: "#fff", fontSize: 12, fontWeight: "700" },
   lineItemRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#f4f4f5" },
   amount: { fontWeight: "600" },
   totals: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: "#e4e4e7", gap: 4 },

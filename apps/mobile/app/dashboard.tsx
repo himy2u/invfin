@@ -3,6 +3,7 @@ import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
 import { supabase } from "../lib/supabase";
 import { colors, spacing, radius, typography, card, cardShadow } from "../lib/theme";
+import { formatMoney } from "../lib/money";
 
 type Stats = {
   outstandingInvoiceTotal: number;
@@ -12,6 +13,8 @@ type Stats = {
   pendingReviewCount: number;
   estimateCount: number;
   clientCount: number;
+  invoiceCurrency: string;
+  billCurrency: string;
 };
 
 const EMPTY_STATS: Stats = {
@@ -22,7 +25,20 @@ const EMPTY_STATS: Stats = {
   pendingReviewCount: 0,
   estimateCount: 0,
   clientCount: 0,
+  invoiceCurrency: "USD",
+  billCurrency: "USD",
 };
+
+/** The currency most of a set of rows is denominated in. Used so a tile's single summed figure is at
+ * least labelled with the currency it mostly represents, instead of a bare number. */
+function dominantCurrency(rows: { currency?: string | null }[]): string {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const code = r.currency ?? "";
+    counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "USD";
+}
 
 export default function DashboardScreen() {
   const router = useRouter();
@@ -31,6 +47,9 @@ export default function DashboardScreen() {
   const [detectionEnabled, setDetectionEnabled] = useState(false);
   const [sourceEmail, setSourceEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Unread in-app notification count, for the bell in this screen's header. The channel has been
+  // writing rows all along with nothing to read them; see app/notifications.tsx.
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
@@ -43,12 +62,13 @@ export default function DashboardScreen() {
         if (!id) return;
 
         Promise.all([
-          supabase.from("invoices").select("id, status, total_cents"),
-          supabase.from("bills").select("id, status, total_cents"),
+          supabase.from("invoices").select("id, status, total_cents, currency"),
+          supabase.from("bills").select("id, status, total_cents, currency"),
           supabase.from("estimates").select("id"),
           supabase.from("clients").select("id"),
           supabase.from("email_forwarding_addresses").select("enabled, source_email").eq("user_id", id).maybeSingle(),
-        ]).then(([invoicesRes, billsRes, estimatesRes, clientsRes, forwardingRes]) => {
+          supabase.from("notifications").select("id", { count: "exact", head: true }).is("read_at", null),
+        ]).then(([invoicesRes, billsRes, estimatesRes, clientsRes, forwardingRes, unreadRes]) => {
           if (cancelled) return;
           const invoices = invoicesRes.data ?? [];
           const bills = billsRes.data ?? [];
@@ -62,7 +82,10 @@ export default function DashboardScreen() {
             pendingReviewCount: bills.filter((b) => b.status === "pending_review").length,
             estimateCount: (estimatesRes.data ?? []).length,
             clientCount: (clientsRes.data ?? []).length,
+            invoiceCurrency: dominantCurrency(outstandingInvoices),
+            billCurrency: dominantCurrency(unpaidBills),
           });
+          setUnreadCount(unreadRes.count ?? 0);
           setDetectionEnabled(forwardingRes.data?.enabled ?? false);
           setSourceEmail(forwardingRes.data?.source_email ?? null);
           setLoading(false);
@@ -74,18 +97,20 @@ export default function DashboardScreen() {
     }, []),
   );
 
+  // One currency per tile rather than a blended sum across currencies, which would be an invented
+  // number. Matches apps/web/app/dashboard/page.tsx.
   const features = [
     {
       href: "/invoices" as const,
       label: "Invoices",
-      stat: `${(stats.outstandingInvoiceTotal / 100).toFixed(2)}`,
+      stat: formatMoney(stats.outstandingInvoiceTotal, stats.invoiceCurrency),
       sub: `${stats.outstandingInvoiceCount} outstanding`,
       testID: "dashboard-invoices-tile",
     },
     {
       href: "/bills" as const,
       label: "Bills",
-      stat: `${(stats.unpaidBillTotal / 100).toFixed(2)}`,
+      stat: formatMoney(stats.unpaidBillTotal, stats.billCurrency),
       sub:
         stats.pendingReviewCount > 0
           ? `${stats.unpaidBillCount} unpaid · ${stats.pendingReviewCount} to review`
@@ -110,10 +135,22 @@ export default function DashboardScreen() {
 
   return (
     <ScrollView style={styles.container} testID="dashboard-screen">
-      <Text style={typography.title}>Dashboard</Text>
-      <Text style={styles.signedIn} numberOfLines={1}>
-        {email}
-      </Text>
+      <View style={styles.titleRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={typography.title}>Dashboard</Text>
+          <Text style={styles.signedIn} numberOfLines={1}>
+            {email}
+          </Text>
+        </View>
+        <Pressable onPress={() => router.push("/notifications")} testID="notification-bell" style={styles.bell}>
+          <Text style={{ fontSize: 20 }}>🔔</Text>
+          {unreadCount > 0 && (
+            <View style={styles.bellBadge} testID="notification-badge">
+              <Text style={styles.bellBadgeText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
+            </View>
+          )}
+        </Pressable>
+      </View>
 
       {/* Auto-detect & remind always sits at the very top, on or off. set-and-forget is the
           whole pitch, so its status should be the first thing a returning user sees. */}
@@ -203,7 +240,20 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: spacing.xl },
-  signedIn: { fontSize: 12, color: colors.textMuted, marginBottom: spacing.lg },
+  signedIn: { fontSize: 12, color: colors.textMuted },
+  titleRow: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, marginBottom: spacing.lg },
+  bell: { padding: 4 },
+  bellBadge: {
+    position: "absolute",
+    right: 0,
+    top: 0,
+    minWidth: 16,
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    backgroundColor: colors.danger,
+    alignItems: "center",
+  },
+  bellBadgeText: { color: "#fff", fontSize: 10, fontWeight: "700", lineHeight: 16 },
   detectionBanner: {
     flexDirection: "row",
     alignItems: "center",

@@ -1,9 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { REMINDER_UNITS, type ReminderDraft, defaultExactLocalValue, reminderUpdatePayload } from "@/lib/reminder-draft";
+import { formatMoney } from "@/lib/money";
+import { type ReminderDraft, defaultExactLocalValue, reminderUpdatePayload } from "@/lib/reminder-draft";
+import { ReminderFields } from "./reminder-fields";
 
 type PendingBill = {
   id: string;
@@ -15,6 +17,9 @@ type PendingBill = {
   reminder_offset_value: number;
   reminder_offset_unit: string;
   reminder_at: string | null;
+  bill_number?: string | null;
+  duplicate_of_bill_id?: string | null;
+  duplicate_of_bill_number?: string | null;
 };
 
 /**
@@ -52,57 +57,104 @@ export function PendingReviewSection({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"approve" | "dismiss" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, ReminderDraft>>(
-    Object.fromEntries(
-      bills.map((b) => [
-        b.id,
-        {
-          mode: b.reminder_mode === "exact" ? "exact" : "offset",
-          value: String(b.reminder_offset_value),
-          unit: b.reminder_offset_unit,
-          // The datetime-local input needs a local-time string, never an ISO/UTC one — feeding it
-          // a Z-suffixed value makes it render blank with no error.
-          exactLocal: defaultExactLocalValue(b.reminder_at, b.due_date),
-        } satisfies ReminderDraft,
-      ]),
-    ),
-  );
+  // Sparse on purpose: a bill with no entry here has not been edited, and draftFor() derives its
+  // draft from the bill's own stored columns instead. The previous version seeded this from `bills`
+  // in a useState initializer, which ran exactly once, so a bill that arrived later (a poll picking
+  // up new mail) had NO entry and `drafts[b.id].mode` threw, taking the whole review table down.
+  const [drafts, setDrafts] = useState<Record<string, ReminderDraft>>({});
+  // "saved" / "saving" per row. Reminder edits are now persisted as they're made rather than held
+  // until Approve: a tester changed Days to Hours, the list re-rendered, and the edit vanished with
+  // no warning. The structural cause is real and not fixable by holding state better. The
+  // connect-email page swaps to a different JSX tree the moment its first bill is detected, which
+  // unmounts this component and any state in it. Writing the value the user just chose is the only
+  // version of this that cannot silently lose it.
+  const [saveState, setSaveState] = useState<Record<string, "saving" | "saved">>({});
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    const timers = saveTimers.current;
+    return () => {
+      Object.values(timers).forEach(clearTimeout);
+    };
+  }, []);
+
+  function draftFor(b: PendingBill): ReminderDraft {
+    return (
+      drafts[b.id] ?? {
+        mode: b.reminder_mode === "exact" ? "exact" : "offset",
+        value: String(b.reminder_offset_value),
+        unit: b.reminder_offset_unit,
+        // The datetime-local input needs a local-time string, never an ISO/UTC one. Feeding it
+        // a Z-suffixed value makes it render blank with no error.
+        exactLocal: defaultExactLocalValue(b.reminder_at, b.due_date),
+      }
+    );
+  }
+
+  async function persist(billId: string, draft: ReminderDraft): Promise<boolean> {
+    const result = reminderUpdatePayload(draft);
+    if (!result.ok) {
+      setError(result.error);
+      setSaveState((prev) => {
+        const next = { ...prev };
+        delete next[billId];
+        return next;
+      });
+      return false;
+    }
+    setError(null);
+    const { error: updateError } = await supabase.from("bills").update(result.payload).eq("id", billId);
+    if (updateError) {
+      setError(updateError.message);
+      setSaveState((prev) => {
+        const next = { ...prev };
+        delete next[billId];
+        return next;
+      });
+      return false;
+    }
+    setSaveState((prev) => ({ ...prev, [billId]: "saved" }));
+    return true;
+  }
+
+  function updateDraft(b: PendingBill, patch: Partial<ReminderDraft>) {
+    const next = { ...draftFor(b), ...patch };
+    setDrafts((prev) => ({ ...prev, [b.id]: next }));
+    setSaveState((prev) => ({ ...prev, [b.id]: "saving" }));
+    // Debounced, so typing "45" in the value field is one write rather than one per keystroke. The
+    // delay is short enough that it lands well before a user can navigate away, and Approve saves
+    // again unconditionally so the final value can never be the one that got debounced out.
+    clearTimeout(saveTimers.current[b.id]);
+    saveTimers.current[b.id] = setTimeout(() => {
+      void persist(b.id, next);
+    }, 600);
+  }
 
   if (bills.length === 0) return <>{emptyState}</>;
 
-  function updateDraft(billId: string, patch: Partial<ReminderDraft>) {
-    setDrafts((prev) => ({ ...prev, [billId]: { ...prev[billId], ...patch } }));
-  }
-
-  async function approve(billId: string) {
-    setBusyId(billId);
+  async function approve(b: PendingBill) {
+    setBusyId(b.id);
     setBusyAction("approve");
     setError(null);
     // Accepting a detected bill and confirming when to be reminded about it happen in one step:
     // save whatever reminder timing is currently in the row before flipping it to unpaid, so the
-    // user isn't confirming a value they never actually saw applied.
-    const payload = reminderUpdatePayload(drafts[billId]);
-    if (!payload) {
+    // user isn't confirming a value they never actually saw applied. This also flushes any autosave
+    // still sitting in its debounce.
+    clearTimeout(saveTimers.current[b.id]);
+    const saved = await persist(b.id, draftFor(b));
+    if (!saved) {
       setBusyId(null);
       setBusyAction(null);
-      setError("Pick a date and time for the reminder, or switch back to “Before due date”.");
       return;
     }
-    const { error: updateError } = await supabase.from("bills").update(payload).eq("id", billId);
-    if (updateError) {
-      setBusyId(null);
-      setBusyAction(null);
-      setError(updateError.message);
-      return;
-    }
-    const { error: rpcError } = await supabase.rpc("approve_detected_bill", { p_bill_id: billId });
+    const { error: rpcError } = await supabase.rpc("approve_detected_bill", { p_bill_id: b.id });
     setBusyId(null);
     setBusyAction(null);
     if (rpcError) {
       setError(rpcError.message);
       return;
     }
-    onChanged?.(billId);
+    onChanged?.(b.id);
     router.refresh();
   }
 
@@ -110,6 +162,7 @@ export function PendingReviewSection({
     setBusyId(billId);
     setBusyAction("dismiss");
     setError(null);
+    clearTimeout(saveTimers.current[billId]);
     const { error } = await supabase.rpc("dismiss_detected_bill", { p_bill_id: billId });
     setBusyId(null);
     setBusyAction(null);
@@ -129,69 +182,18 @@ export function PendingReviewSection({
   // Stays inline in the row rather than opening a modal, matching this table's "everything editable
   // is inline" rule: the whole point of the review queue is tick-and-approve without a detour.
   function reminderInput(b: PendingBill) {
-    const draft = drafts[b.id];
-    const isExact = draft.mode === "exact";
     return (
-      <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-600" data-testid="pending-review-reminder">
-        <span>Remind me</span>
-        {/* Two buttons rather than a <select>: the choice changes which fields appear next to it,
-            and a segmented control makes that cause-and-effect visible at a glance. */}
-        <div className="inline-flex overflow-hidden rounded border border-zinc-300">
-          {(
-            [
-              ["offset", "Before due date"],
-              ["exact", "Specific date"],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              data-testid={`reminder-mode-${mode}`}
-              aria-pressed={draft.mode === mode}
-              onClick={() => updateDraft(b.id, { mode })}
-              className={
-                draft.mode === mode
-                  ? "bg-teal-700 px-2 py-1 text-[11px] font-medium text-white"
-                  : "bg-white px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-50"
-              }
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {isExact ? (
-          <input
-            type="datetime-local"
-            value={draft.exactLocal}
-            data-testid="pending-review-reminder-at"
-            onChange={(e) => updateDraft(b.id, { exactLocal: e.target.value })}
-            className="rounded border border-zinc-300 px-1.5 py-1 text-xs"
-          />
-        ) : (
-          <>
-            <input
-              type="number"
-              min={0}
-              value={draft.value}
-              data-testid="pending-review-reminder-value"
-              onChange={(e) => updateDraft(b.id, { value: e.target.value })}
-              className="w-14 rounded border border-zinc-300 px-1.5 py-1 text-xs"
-            />
-            <select
-              value={draft.unit}
-              data-testid="pending-review-reminder-unit"
-              onChange={(e) => updateDraft(b.id, { unit: e.target.value })}
-              className="rounded border border-zinc-300 px-1.5 py-1 text-xs"
-            >
-              {REMINDER_UNITS.map((u) => (
-                <option key={u.value} value={u.value}>
-                  {u.label}
-                </option>
-              ))}
-            </select>
-            <span>before</span>
-          </>
+      <div className="flex flex-wrap items-center gap-2">
+        <ReminderFields draft={draftFor(b)} onChange={(patch) => updateDraft(b, patch)} idPrefix={b.id} />
+        {/* The save cue is deliberately quiet but present: an edit that persists invisibly is
+            indistinguishable, to the user, from the silent revert this replaced. */}
+        {saveState[b.id] && (
+          <span
+            className={saveState[b.id] === "saved" ? "text-[11px] text-teal-700" : "text-[11px] text-zinc-400"}
+            data-testid="reminder-save-state"
+          >
+            {saveState[b.id] === "saved" ? "Saved" : "Saving…"}
+          </span>
         )}
       </div>
     );
@@ -211,7 +213,7 @@ export function PendingReviewSection({
         <button
           data-testid="approve-detected-bill"
           disabled={busyId === b.id}
-          onClick={() => approve(b.id)}
+          onClick={() => approve(b)}
           className="rounded bg-teal-700 px-3 py-1.5 text-xs text-white hover:bg-teal-800 disabled:opacity-50"
         >
           {busyId === b.id && busyAction === "approve" ? "Approving…" : "Approve"}
@@ -231,6 +233,48 @@ export function PendingReviewSection({
     );
   }
 
+  // Flagged by create_detected_bill rather than silently dropped: the app's own setup instructions
+  // tell users to forward their existing backlog manually once, which is exactly how the same bill
+  // arrives twice with two different Postmark MessageIDs. Two indistinguishable rows is the bad
+  // outcome; so is deleting a bill the user might genuinely owe twice. Naming the match lets them
+  // decide, with Dismiss already sitting right there.
+  // ONE grid template, shared by the header, the /connect-email table rows and the /bills notice
+  // rows. Both testers reported the same misalignment on both pages, and the reason it was the same
+  // bug twice is that the two variants were laying the same three fields out two different ways.
+  //
+  // minmax(0,2fr) rather than a bare 2fr: a bare fr track is minmax(auto, 2fr), so its min-content
+  // width acts as a floor and a long vendor name shoves Due and Amount rightward on that row only.
+  // A flex row with a flex-1 vendor has the mirror-image problem, since the columns then float on
+  // the natural width of the amount. Fixed tracks plus `truncate` on the vendor is what actually
+  // makes row N line up with row N+1.
+  const COLUMNS = "sm:grid sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)] sm:items-center sm:gap-3";
+
+  function dataRow(b: PendingBill) {
+    return (
+      <div className={`flex flex-col gap-0.5 ${COLUMNS}`}>
+        <p className="truncate text-sm font-medium text-zinc-900" title={b.vendor_name}>
+          {b.vendor_name}
+        </p>
+        <p className="whitespace-nowrap text-sm" data-testid="pending-review-due-date">
+          {dueDate(b)}
+        </p>
+        <p className="whitespace-nowrap text-sm text-zinc-700 sm:text-right" data-testid="pending-review-amount">
+          {formatMoney(b.total_cents, b.currency)}
+        </p>
+      </div>
+    );
+  }
+
+  function duplicateFlag(b: PendingBill) {
+    if (!b.duplicate_of_bill_id) return null;
+    return (
+      <p className="text-[11px] font-medium text-amber-700" data-testid="duplicate-bill-flag">
+        ⚠ Possible duplicate of {b.duplicate_of_bill_number ?? "an existing bill"}: same vendor, amount and due date.
+        Dismiss this one if it&apos;s the same bill.
+      </p>
+    );
+  }
+
   return (
     <div
       className={isTable ? "mb-4" : "mb-6 rounded-lg border border-sky-200 bg-sky-50 p-4"}
@@ -241,15 +285,16 @@ export function PendingReviewSection({
           {bills.length} bill{bills.length === 1 ? "" : "s"} detected from email, review before they count as unpaid
         </p>
       )}
-      {error && <p className="mb-2 text-sm text-red-600">{error}</p>}
+      {error && <p className="mb-2 text-sm text-red-600" data-testid="pending-review-error">{error}</p>}
 
       {isTable && (
         // Header row only, not a real <table>: the rows below have to collapse to a stacked card on
-        // a narrow screen, which a table can't do. Hidden under sm for the same reason.
-        <div className="hidden grid-cols-[2fr_1fr_1fr] items-center gap-3 border-b border-zinc-200 px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 sm:grid">
+        // a narrow screen, which a table can't do. Hidden under sm for the same reason. Uses the
+        // same COLUMNS template as the rows, so the headings cannot drift off the data under them.
+        <div className={`hidden border-b border-zinc-200 px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 ${COLUMNS}`}>
           <span>Vendor</span>
           <span>Due</span>
-          <span>Amount</span>
+          <span className="text-right">Amount</span>
         </div>
       )}
 
@@ -261,36 +306,27 @@ export function PendingReviewSection({
             // date into two-line wraps (which is exactly what a one-line version did). Still inline
             // in the row — no modal — just stacked beneath it.
             <div key={b.id} data-testid="pending-review-row" className="flex flex-col gap-2 px-3 py-3">
-              <div className="flex flex-col gap-0.5 sm:grid sm:grid-cols-[2fr_1fr_1fr] sm:items-center sm:gap-3">
-                <p className="text-sm font-medium text-zinc-900">{b.vendor_name}</p>
-                <p className="text-sm" data-testid="pending-review-due-date">
-                  {dueDate(b)}
-                </p>
-                <p className="text-sm text-zinc-700">
-                  {(b.total_cents / 100).toFixed(2)} {b.currency}
-                </p>
-              </div>
+              {dataRow(b)}
+              {duplicateFlag(b)}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 {reminderInput(b)}
                 {actions(b)}
               </div>
             </div>
           ) : (
+            // Stacked, not a side-by-side row. The data and the reminder controls competing for one
+            // horizontal line is what produced the misalignment both testers reported: the controls
+            // are a segmented toggle plus two fields, so whatever is left over for the vendor name
+            // collapses and wraps a word per line. Same two-line shape, and the same COLUMNS grid,
+            // that the table variant uses.
             <div
               key={b.id}
               data-testid="pending-review-row"
-              className="flex flex-col gap-2 rounded border border-sky-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between"
+              className="flex flex-col gap-2 rounded border border-sky-200 bg-white p-3"
             >
-              <div>
-                <p className="text-sm font-medium">{b.vendor_name}</p>
-                <p className="text-sm" data-testid="pending-review-due-date">
-                  {dueDate(b)}
-                </p>
-                <p className="text-xs text-zinc-500">
-                  {(b.total_cents / 100).toFixed(2)} {b.currency}
-                </p>
-              </div>
-              <div className="flex items-center gap-3">
+              {dataRow(b)}
+              {duplicateFlag(b)}
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 {reminderInput(b)}
                 {actions(b)}
               </div>

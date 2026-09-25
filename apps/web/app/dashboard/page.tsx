@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { formatMoney } from "@/lib/money";
 import { EmailDetectionBanner } from "../invoices/email-detection-banner";
+import { NotificationBell } from "../notifications/notification-bell";
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -12,8 +14,8 @@ export default async function DashboardPage() {
   // Invoices page's own stats (no invented placeholder numbers on a dashboard).
   const [{ data: invoices }, { data: bills }, { data: estimates }, { data: clients }, { data: forwardingAddress }] =
     await Promise.all([
-      supabase.from("invoices").select("id, status, total_cents"),
-      supabase.from("bills").select("id, status, total_cents"),
+      supabase.from("invoices").select("id, status, total_cents, currency"),
+      supabase.from("bills").select("id, status, total_cents, currency"),
       supabase.from("estimates").select("id"),
       supabase.from("clients").select("id"),
       supabase.from("email_forwarding_addresses").select("enabled, source_email").eq("user_id", user!.id).maybeSingle(),
@@ -27,18 +29,32 @@ export default async function DashboardPage() {
 
   const detectionEnabled = forwardingAddress?.enabled ?? false;
 
+  // These two tiles each sum a set of rows that can, in principle, span currencies. Rather than
+  // invent a blended figure, each tile formats in the currency the majority of its own rows use,
+  // and the per-bill/per-invoice screens behind them show each row in its real currency.
+  const dominantCurrency = (rows: { currency?: string | null }[]) => {
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      const code = r.currency ?? "";
+      counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "USD";
+  };
+  const invoiceCurrency = dominantCurrency(outstandingInvoices);
+  const billCurrency = dominantCurrency(unpaidBills);
+
   const features = [
     {
       href: "/invoices",
       label: "Invoices",
-      stat: `${(outstandingTotal / 100).toFixed(2)} outstanding`,
+      stat: `${formatMoney(outstandingTotal, invoiceCurrency)} outstanding`,
       sub: `${outstandingInvoices.length} invoice${outstandingInvoices.length === 1 ? "" : "s"}`,
       testId: "dashboard-invoices-tile",
     },
     {
       href: "/bills",
       label: "Bills",
-      stat: `${(unpaidTotal / 100).toFixed(2)} unpaid`,
+      stat: `${formatMoney(unpaidTotal, billCurrency)} unpaid`,
       sub:
         pendingReviewCount > 0
           ? `${unpaidBills.length} bill${unpaidBills.length === 1 ? "" : "s"} · ${pendingReviewCount} to review`
@@ -68,9 +84,12 @@ export default async function DashboardPage() {
           <p className="mb-1 text-sm text-zinc-500">Signed in as {user?.email}</p>
           <h1 className="text-2xl font-semibold text-zinc-900">Dashboard</h1>
         </div>
-        <Link href="/settings" className="text-sm text-teal-700 underline" data-testid="settings-link">
-          Business info
-        </Link>
+        <div className="flex items-center gap-4">
+          <NotificationBell />
+          <Link href="/settings" className="text-sm text-teal-700 underline" data-testid="settings-link">
+            Business info
+          </Link>
+        </div>
       </div>
 
       {/* Auto-detect & remind always sits at the very top, whether on or off. set-and-forget is

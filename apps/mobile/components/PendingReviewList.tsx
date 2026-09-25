@@ -1,12 +1,16 @@
-import { useState, type ReactNode } from "react";
-import { View, Text, TextInput, Pressable, StyleSheet, Platform } from "react-native";
-import DateTimePicker, { type DateTimePickerEvent } from "@react-native-community/datetimepicker";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { View, Text, Pressable, StyleSheet } from "react-native";
 import { supabase } from "../lib/supabase";
 import { colors, spacing, radius } from "../lib/theme";
-import { REMINDER_UNITS, type ReminderDraft, defaultExactAt, formatExactAt, reminderUpdatePayload } from "../lib/reminder-draft";
+import { formatMoney } from "../lib/money";
+import { type ReminderDraft, defaultExactAt, reminderUpdatePayload } from "../lib/reminder-draft";
+import { ReminderControls } from "./ReminderControls";
 
 export type PendingBill = {
   id: string;
+  bill_number?: string | null;
+  duplicate_of_bill_id?: string | null;
+  duplicate_of_bill_number?: string | null;
   vendor_name: string;
   total_cents: number;
   currency: string;
@@ -51,9 +55,17 @@ export function PendingReviewList({
   const [busyAction, setBusyAction] = useState<"approve" | "dismiss" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, ReminderDraft>>({});
-  // Android's picker is a one-shot modal and needs two passes (date, then time); iOS renders inline
-  // and edits both at once. Tracking which bill + which stage is open covers both.
-  const [picker, setPicker] = useState<{ billId: string; stage: "date" | "time" } | null>(null);
+  // Reminder edits are written as they're made, not held until Approve. See the equivalent comment in
+  // apps/web/app/bills/pending-review-section.tsx: an edit that only exists in component state is one
+  // re-mount away from being silently lost, and losing a value the user just chose is not acceptable
+  // on either platform.
+  const [saveState, setSaveState] = useState<Record<string, "saving" | "saved">>({});
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    const timers = saveTimers.current;
+    return () => Object.values(timers).forEach(clearTimeout);
+  }, []);
 
   function draftFor(b: PendingBill): ReminderDraft {
     return (
@@ -66,14 +78,45 @@ export function PendingReviewList({
     );
   }
 
+  async function persist(billId: string, draft: ReminderDraft): Promise<boolean> {
+    const result = reminderUpdatePayload(draft);
+    const clearSaveState = () =>
+      setSaveState((prev) => {
+        const next = { ...prev };
+        delete next[billId];
+        return next;
+      });
+    if (!result.ok) {
+      setError(result.error);
+      clearSaveState();
+      return false;
+    }
+    setError(null);
+    const { error: updateError } = await supabase.from("bills").update(result.payload).eq("id", billId);
+    if (updateError) {
+      setError(updateError.message);
+      clearSaveState();
+      return false;
+    }
+    setSaveState((prev) => ({ ...prev, [billId]: "saved" }));
+    return true;
+  }
+
   function updateDraft(b: PendingBill, patch: Partial<ReminderDraft>) {
-    setDrafts((prev) => ({ ...prev, [b.id]: { ...draftFor(b), ...patch } }));
+    const next = { ...draftFor(b), ...patch };
+    setDrafts((prev) => ({ ...prev, [b.id]: next }));
+    setSaveState((prev) => ({ ...prev, [b.id]: "saving" }));
+    clearTimeout(saveTimers.current[b.id]);
+    saveTimers.current[b.id] = setTimeout(() => {
+      void persist(b.id, next);
+    }, 600);
   }
 
   async function dismiss(billId: string) {
     setBusyId(billId);
     setBusyAction("dismiss");
     setError(null);
+    clearTimeout(saveTimers.current[billId]);
     const { error } = await supabase.rpc("dismiss_detected_bill", { p_bill_id: billId });
     setBusyId(null);
     setBusyAction(null);
@@ -91,18 +134,17 @@ export function PendingReviewList({
     // Accepting a detected bill and confirming when to be reminded about it happen in one step:
     // save whatever reminder timing is currently in the row before flipping it to unpaid.
     const bill = bills.find((b) => b.id === billId);
-    const payload = bill ? reminderUpdatePayload(draftFor(bill)) : null;
-    if (!payload) {
+    if (!bill) {
       setBusyId(null);
       setBusyAction(null);
-      setError("Pick a date and time for the reminder, or switch back to “Before due date”.");
       return;
     }
-    const { error: updateError } = await supabase.from("bills").update(payload).eq("id", billId);
-    if (updateError) {
+    // Flushes any autosave still sitting in its debounce, so the value on screen is the value saved.
+    clearTimeout(saveTimers.current[billId]);
+    const saved = await persist(billId, draftFor(bill));
+    if (!saved) {
       setBusyId(null);
       setBusyAction(null);
-      setError(updateError.message);
       return;
     }
     const { error } = await supabase.rpc("approve_detected_bill", { p_bill_id: billId });
@@ -120,80 +162,7 @@ export function PendingReviewList({
   const isTable = variant === "table";
 
   function reminderControls(b: PendingBill) {
-    const draft = draftFor(b);
-    return (
-      <View style={styles.reminderBlock} testID="pending-review-reminder">
-        <Text style={styles.reminderLabel}>Remind me</Text>
-        <View style={styles.segmented}>
-          {(
-            [
-              ["offset", "Before due"],
-              ["exact", "Specific date"],
-            ] as const
-          ).map(([mode, label]) => (
-            <Pressable
-              key={mode}
-              testID={`reminder-mode-${mode}`}
-              onPress={() => updateDraft(b, { mode })}
-              style={[styles.segment, draft.mode === mode && styles.segmentActive]}
-            >
-              <Text style={[styles.segmentText, draft.mode === mode && styles.segmentTextActive]}>{label}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        {draft.mode === "exact" ? (
-          <View style={styles.reminderRow}>
-            <Pressable
-              testID="pending-review-reminder-at"
-              onPress={() => setPicker({ billId: b.id, stage: "date" })}
-              style={styles.pickerButton}
-            >
-              <Text style={styles.pickerButtonText}>{formatExactAt(draft.exactAt)}</Text>
-            </Pressable>
-            {picker?.billId === b.id && (
-              <DateTimePicker
-                value={draft.exactAt ?? new Date()}
-                mode={Platform.OS === "ios" ? "datetime" : picker.stage}
-                onChange={(event: DateTimePickerEvent, selected?: Date) => {
-                  if (event.type === "dismissed" || !selected) {
-                    setPicker(null);
-                    return;
-                  }
-                  updateDraft(b, { exactAt: selected });
-                  // iOS edits date and time together, so one pass is the whole edit. Android has to
-                  // hand off to the time picker, otherwise the minute the user typed is discarded.
-                  setPicker(Platform.OS === "android" && picker.stage === "date" ? { billId: b.id, stage: "time" } : null);
-                }}
-              />
-            )}
-          </View>
-        ) : (
-          <View style={styles.reminderRow}>
-            <TextInput
-              style={styles.reminderInput}
-              value={draft.value}
-              onChangeText={(v) => updateDraft(b, { value: v })}
-              keyboardType="number-pad"
-              testID="pending-review-reminder-value"
-            />
-            <View style={styles.segmented}>
-              {REMINDER_UNITS.map((u) => (
-                <Pressable
-                  key={u.value}
-                  testID={`reminder-unit-${u.value}`}
-                  onPress={() => updateDraft(b, { unit: u.value })}
-                  style={[styles.segment, draft.unit === u.value && styles.segmentActive]}
-                >
-                  <Text style={[styles.segmentText, draft.unit === u.value && styles.segmentTextActive]}>{u.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-            <Text style={styles.reminderLabel}>before</Text>
-          </View>
-        )}
-      </View>
-    );
+    return <ReminderControls draft={draftFor(b)} onChange={(patch) => updateDraft(b, patch)} />;
   }
 
   return (
@@ -217,12 +186,21 @@ export function PendingReviewList({
                 {b.due_date ? `Due ${b.due_date}` : "No due date"}
               </Text>
             </View>
-            <Text style={styles.amount}>
-              {(b.total_cents / 100).toFixed(2)} {b.currency}
-            </Text>
+            <Text style={styles.amount}>{formatMoney(b.total_cents, b.currency)}</Text>
           </View>
+          {b.duplicate_of_bill_id && (
+            <Text style={styles.duplicateFlag} testID="duplicate-bill-flag">
+              ⚠ Possible duplicate of {b.duplicate_of_bill_number ?? "an existing bill"}: same vendor, amount and due
+              date. Dismiss this one if it’s the same bill.
+            </Text>
+          )}
           <View style={styles.actionRow}>
             {reminderControls(b)}
+            {saveState[b.id] && (
+              <Text style={saveState[b.id] === "saved" ? styles.savedCue : styles.savingCue} testID="reminder-save-state">
+                {saveState[b.id] === "saved" ? "Saved" : "Saving…"}
+              </Text>
+            )}
             <View style={styles.buttonRow}>
               <Pressable testID="dismiss-detected-bill" disabled={busyId === b.id} onPress={() => dismiss(b.id)} style={styles.dismissButton}>
                 <Text style={styles.dismissButtonText}>
@@ -255,17 +233,9 @@ const styles = StyleSheet.create({
   dueDateMissing: { fontSize: 13, fontWeight: "600", color: colors.textMuted, marginTop: 2 },
   amount: { fontSize: 13, fontWeight: "700", color: colors.textPrimary },
   actionRow: { gap: spacing.sm, marginTop: spacing.sm },
-  reminderBlock: { gap: 6 },
-  reminderRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
-  reminderLabel: { fontSize: 11, color: colors.textSecondary },
-  reminderInput: { borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 4, fontSize: 12, width: 48, textAlign: "center" },
-  segmented: { flexDirection: "row", borderWidth: 1, borderColor: colors.border, borderRadius: 6, overflow: "hidden" },
-  segment: { paddingHorizontal: 8, paddingVertical: 5, backgroundColor: colors.surface },
-  segmentActive: { backgroundColor: colors.brand },
-  segmentText: { fontSize: 11, color: colors.textSecondary, fontWeight: "600" },
-  segmentTextActive: { color: colors.textOnBrand },
-  pickerButton: { borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6 },
-  pickerButtonText: { fontSize: 12, color: colors.textPrimary, fontWeight: "600" },
+  duplicateFlag: { fontSize: 11, color: "#b45309", fontWeight: "600", marginTop: 6 },
+  savedCue: { fontSize: 11, color: colors.brand, fontWeight: "600" },
+  savingCue: { fontSize: 11, color: colors.textMuted },
   buttonRow: { flexDirection: "row", gap: spacing.sm, justifyContent: "flex-end" },
   dismissButton: { borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 },
   dismissButtonText: { fontSize: 11, color: colors.textSecondary, fontWeight: "600" },

@@ -13,6 +13,12 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },
+  // 5s (the default) is shorter than a cold Next dev compile of a route these tests are the first to
+  // visit, so whichever spec happened to hit an uncompiled page first would fail on a timeout that
+  // had nothing to do with what it was asserting, producing a rotating, confusing flake. These also
+  // talk to a hosted Supabase over the network rather than a local one, so every round trip carries
+  // real latency. Raising the assertion timeout removes both without weakening a single assertion.
+  expect: { timeout: 15_000 },
   use: {
     baseURL: "http://localhost:3000",
   },
